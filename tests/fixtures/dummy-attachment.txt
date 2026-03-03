@@ -1,0 +1,1 @@
+Smoke test dummy attachment for course.
