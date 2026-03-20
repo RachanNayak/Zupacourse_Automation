@@ -1,4 +1,4 @@
-"""Smoke test: Can an admin create a Long Course? (Full flow using POM.)"""
+"""Smoke test: Can an admin create a Short Course? (Full flow using POM.)"""
 import os
 import random
 import time as _time
@@ -10,9 +10,9 @@ from playwright.sync_api import Page, expect
 
 from config import ADMIN_EMAIL, BASE_URL, MANUAL_OTP, SIGN_OUT_FIRST
 from helpers.auth import login_as_admin, sign_out
-from tests.pages.long_course_page import LongCoursePage
+from tests.pages.short_course_page import ShortCoursePage
 
-# Fixtures (paths and env wiring are unchanged; now passed into page objects)
+# Fixtures (reuse the same structure as the long-course test)
 TESTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURES_DIR = os.path.join(TESTS_DIR, "fixtures")
 IMAGES_DIR = os.path.join(FIXTURES_DIR, "images")
@@ -67,14 +67,13 @@ VIDEO_FILE_PATH = os.getenv(
 
 @allure.epic("LMS Admin")
 @allure.feature("Course Management")
-@allure.story("Create Long Course")
+@allure.story("Create Short Course")
 @allure.severity(allure.severity_level.CRITICAL)
 @pytest.mark.smoke
-def test_admin_create_long_course(page: Page) -> None:
+def test_admin_create_short_course(page: Page) -> None:
     """
-    Full Long Course flow: Login (manual OTP) → Create Course → Create Batches →
-    Create Modules → Add Videos → Enrollment & Price → Publish Course.
-    Uses codegen locators.
+    Full Short Course flow: Login (manual OTP) → Create Course → Create Module →
+    Add Video → Enrollment & Price → Publish Course.
     """
     with allure.step("Login as admin"):
         if SIGN_OUT_FIRST:
@@ -84,22 +83,19 @@ def test_admin_create_long_course(page: Page) -> None:
         assert "/auth/sign-in" not in page.url
 
     titles = [
-        "Divyakala art",
-        "Testing course",
-        "Cricket",
-        "Football",
-        "Looong cousre",
-        "Drawing",
-        "Divine Art",
+        "Test Draw",
+        "Short Course Cricket",
+        "Short Course Football",
+        "Short Divine Art",
     ]
     suffix = _time.strftime("%m%d%H%M")
     title = random.choice(titles) + " " + suffix
-    allure.dynamic.title(f"Admin creates Long Course: {title}")
+    allure.dynamic.title(f"Admin creates Short Course: {title}")
 
-    long_course = LongCoursePage(page)
+    short_course = ShortCoursePage(page)
 
     with allure.step(f"Fill course details (title={title!r})"):
-        course_info = long_course.fill_course_details(title=title, course_image_path=COURSE_IMAGE_PATH, dummy_file_path=DUMMY_FILE_PATH)
+        course_info = short_course.fill_course_details(title=title, course_image_path=COURSE_IMAGE_PATH, dummy_file_path=DUMMY_FILE_PATH)
 
     allure.attach(
         f"Title: {title}\nAuthor: {course_info['author']}\nImage: {course_info['image_filename']}",
@@ -107,30 +103,35 @@ def test_admin_create_long_course(page: Page) -> None:
         attachment_type=allure.attachment_type.TEXT,
     )
 
-    with allure.step("Create batches"):
-        long_course.create_batches()
-
     with allure.step("Create module"):
-        long_course.create_module(module_file_path=MODULE_FILE_PATH)
+        short_course.create_module(module_file_path=MODULE_FILE_PATH)
 
     with allure.step("Add video"):
-        long_course.add_video(video_file_path=VIDEO_FILE_PATH)
+        short_course.add_video(video_file_path=VIDEO_FILE_PATH)
 
     with allure.step("Set enrollment and publish"):
-        long_course.set_enrollment_and_publish()
+        short_course.set_enrollment_and_publish()
 
     with allure.step("Navigate to courses list"):
         page.goto(f"{BASE_URL}/landing/lms/courses")
         page.wait_for_load_state("networkidle")
 
     with allure.step("Verify course card shows exact title, image and author"):
-        # Wait for any course card to appear (try common selectors)
+        # Click the Short Courses tab if it exists (scoped to tab roles to avoid matching combobox spans)
+        short_tab = page.get_by_role("tab", name="Short Courses").or_(
+            page.get_by_role("button", name="Short Courses")
+        )
+        if short_tab.count() > 0:
+            short_tab.first.click()
+            page.wait_for_load_state("networkidle")
+
+        # Wait for any course card to appear
         card_locator = page.locator("mat-card, [class*='course-card'], [class*='course_card'], app-course-card").first
         card_locator.wait_for(state="visible", timeout=20000)
-        # Search for the card that contains the title we created
+        # Search for the title we created
         title_on_page = page.get_by_text(title, exact=False).first
         expect(title_on_page).to_be_visible(timeout=10000)
-        # Find the card containing that title
+        # Find the specific card containing that title
         course_card = page.locator("mat-card, [class*='course-card'], [class*='course_card'], app-course-card").filter(
             has=page.get_by_text(title, exact=False)
         ).first

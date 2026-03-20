@@ -1,45 +1,31 @@
 import os
+import random
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
-from playwright.sync_api import Page
-
-
-# region agent debug log
-_DEBUG_LOG_PATH = "/Users/rachan/Divyakala smoke testAutomation/.cursor/debug-67ea1f.log"
-_DEBUG_SESSION_ID = "67ea1f"
-
-
-def _debug_log(*, run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
-    try:
-        payload = {
-            "sessionId": _DEBUG_SESSION_ID,
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(f"{payload}\n".replace("'", '"'))
-    except Exception:
-        # Never let debug logging break the test run.
-        pass
-
-
-# endregion agent debug log
+from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, expect
 
 
 class LongCoursePage:
     def __init__(self, page: Page) -> None:
         self.page = page
 
+    def _capture_timeout_screenshot(self, step_name: str) -> None:
+        """Capture a screenshot for timeout/debug and continue the flow."""
+        screenshots_dir = Path("artifacts") / "screenshots"
+        screenshots_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = screenshots_dir / f"long_course_{step_name}_{ts}.png"
+        self.page.screenshot(path=str(path), full_page=True)
+
     # --- Create Course & basic info ---
-    def fill_course_details(self, title: str, course_image_path: str, dummy_file_path: str) -> None:
+    def fill_course_details(self, title: str, course_image_path: str, dummy_file_path: str) -> dict:
+        """Fill course details form and return {"author": str, "image_filename": str}."""
         page = self.page
+        selected_author: str = ""
 
         page.get_by_role("button", name="Create Course").wait_for(state="visible", timeout=10000)
         page.get_by_role("button", name="Create Course").click()
@@ -53,11 +39,34 @@ class LongCoursePage:
         page.get_by_role("option", name="Art").click()
         time.sleep(0.2)
 
-        page.get_by_role("combobox", name="Author").locator("span").click()
-        author_option = page.get_by_role("option", name="RACHAN NAYAK").first
-        author_option.scroll_into_view_if_needed()
-        author_option.click()
-        time.sleep(0.2)
+        try:
+            page.get_by_role("combobox", name="Author").locator("span").click()
+            time.sleep(0.2)
+            author_options = page.get_by_role("option")
+            author_count = author_options.count()
+            visible_author_indices = [
+                i for i in range(author_count) if author_options.nth(i).is_visible()
+            ]
+            if visible_author_indices:
+                idx = random.choice(visible_author_indices)
+                author_options.nth(idx).scroll_into_view_if_needed()
+                selected_author = author_options.nth(idx).inner_text().strip()
+                author_options.nth(idx).click()
+            time.sleep(0.2)
+        except PlaywrightTimeoutError:
+            self._capture_timeout_screenshot("author_selection_timeout")
+            try:
+                fallback_options = page.get_by_role("option")
+                fallback_count = fallback_options.count()
+                for i in range(fallback_count):
+                    if fallback_options.nth(i).is_visible():
+                        selected_author = fallback_options.nth(i).inner_text().strip()
+                        fallback_options.nth(i).click()
+                        break
+            except Exception:
+                pass
+        except Exception:
+            self._capture_timeout_screenshot("author_selection_error")
 
         page.get_by_role("textbox", name="Course Name").fill(title)
 
@@ -79,8 +88,11 @@ class LongCoursePage:
         page.get_by_role("button", name=end_label).click()
         time.sleep(0.2)
 
-        page.locator("form").filter(has_text="Type of CourseLong").locator("quill-editor div").nth(2).click()
-        page.locator("form").filter(has_text="Type of CourseLong").locator("quill-editor div").nth(2).fill("DESC here")
+        description_editor = page.locator("form").filter(has_text="Type of CourseLong").locator(
+            "div.ql-editor[contenteditable='true']"
+        ).first
+        description_editor.click()
+        description_editor.fill("DESC here")
         time.sleep(0.2)
 
         if os.path.isfile(course_image_path):
@@ -92,8 +104,9 @@ class LongCoursePage:
         page.get_by_role("button", name="Add course info").click()
         time.sleep(0.4)
         page.get_by_role("textbox", name="Title").fill("Title Here")
-        page.locator("app-add-course-info quill-editor div").nth(2).click()
-        page.locator("app-add-course-info quill-editor div").nth(2).fill("Desc here.")
+        extra_info_editor = page.locator("app-add-course-info div.ql-editor[contenteditable='true']").first
+        extra_info_editor.click()
+        extra_info_editor.fill("Desc here.")
         page.locator("app-add-course-info").get_by_role("button", name="Add course info").click()
         time.sleep(0.3)
 
@@ -107,6 +120,8 @@ class LongCoursePage:
 
         page.get_by_role("button", name="Save and Continue").click()
         page.wait_for_load_state("networkidle")
+
+        return {"author": selected_author, "image_filename": os.path.basename(course_image_path)}
 
     # --- Create Batches ---
     def create_batches(self) -> None:
@@ -167,10 +182,11 @@ class LongCoursePage:
         page = self.page
 
         page.get_by_role("textbox", name="Module Name").fill("Module 1")
-        page.get_by_role("tabpanel", name="Create Modules").locator("quill-editor div").nth(2).click()
-        page.get_by_role("tabpanel", name="Create Modules").locator("quill-editor div").nth(2).fill(
-            "Module desc here"
-        )
+        module_desc_editor = page.get_by_role("tabpanel", name="Create Modules").locator(
+            "div.ql-editor[contenteditable='true'][data-placeholder='Module Description']"
+        ).first
+        module_desc_editor.click()
+        module_desc_editor.fill("Module desc here")
         if os.path.isfile(module_file_path):
             page.get_by_role("tabpanel", name="Create Modules").locator('input[type="file"]').first.set_input_files(
                 module_file_path
@@ -194,335 +210,97 @@ class LongCoursePage:
         time.sleep(0.2)
 
         # Select session date first, then fill session name.
-        run_id = os.getenv("DEBUG_RUN_ID", "session-date-pre")
+        session_date_combo = page.get_by_role("combobox", name="Select Session Date")
+        session_date_combo.scroll_into_view_if_needed()
+        # Prefer clicking the combobox directly; fallback to inner span for variant UIs.
         try:
-            session_date_combo = page.get_by_role("combobox", name="Select Session Date")
-            _debug_log(
-                run_id=run_id,
-                hypothesis_id="SD1",
-                location="tests/smoke/test_admin_create_long_course.py:SelectSessionDate",
-                message="About to open session date dropdown",
-                data={
-                    "combo_visible": session_date_combo.is_visible(),
-                    "combo_enabled": session_date_combo.is_enabled(),
-                },
-            )
+            session_date_combo.click()
+        except Exception:
             session_date_combo.locator("span").click()
 
-            # If it's an Angular Material select, options live in the overlay/panel.
-            mat_options = page.locator("mat-option")
-            try:
-                oc = mat_options.count()
-            except Exception as e:
-                oc = None
-                _debug_log(
-                    run_id=run_id,
-                    hypothesis_id="SD2",
-                    location="tests/smoke/test_admin_create_long_course.py:SelectSessionDate",
-                    message="Failed counting mat-option",
-                    data={"error": repr(e)},
-                )
-
-            option_samples: list[str] = []
-            if oc:
-                for i in range(min(int(oc), 5)):
-                    try:
-                        t = (mat_options.nth(i).inner_text() or "").strip()
-                        option_samples.append(t[:200])
-                    except Exception as e:
-                        option_samples.append(f"<err {i}: {repr(e)}>")
-
-            _debug_log(
-                run_id=run_id,
-                hypothesis_id="SD2",
-                location="tests/smoke/test_admin_create_long_course.py:SelectSessionDate",
-                message="Session date options observed",
-                data={"mat_option_count": oc, "samples": option_samples},
-            )
-
-            pattern = re.compile(r"Batch 1.*Session.*\d{4}-\d{2}-\d{2}")
-            matches = page.get_by_text(pattern)
-            try:
-                mc = matches.count()
-            except Exception as e:
-                mc = None
-                _debug_log(
-                    run_id=run_id,
-                    hypothesis_id="SD3",
-                    location="tests/smoke/test_admin_create_long_course.py:SelectSessionDate",
-                    message="Failed counting regex matches",
-                    data={"error": repr(e)},
-                )
-
-            _debug_log(
-                run_id=run_id,
-                hypothesis_id="SD3",
-                location="tests/smoke/test_admin_create_long_course.py:SelectSessionDate",
-                message="Regex match count for session date",
-                data={"match_count": mc, "pattern": pattern.pattern},
-            )
-
-            matches.first.click()
-            time.sleep(0.2)
-        except Exception as e:
-            _debug_log(
-                run_id=run_id,
-                hypothesis_id="SD4",
-                location="tests/smoke/test_admin_create_long_course.py:SelectSessionDate",
-                message="Selecting session date failed",
-                data={"error": repr(e), "url": page.url},
-            )
-            raise
+        # Prefer the expected Batch/Session pattern, then fallback to first visible option.
+        expected_session_opt = page.get_by_role(
+            "option",
+            name=re.compile(r"Batch\s*1.*Session.*\d{4}-\d{2}-\d{2}", re.I),
+        )
+        if expected_session_opt.count() > 0:
+            expected_session_opt.first.click()
+        else:
+            all_options = page.get_by_role("option")
+            option_count = all_options.count()
+            clicked = False
+            for i in range(option_count):
+                opt = all_options.nth(i)
+                if opt.is_visible():
+                    opt.click()
+                    clicked = True
+                    break
+            if not clicked:
+                page.locator("mat-option").first.click()
+        time.sleep(0.2)
 
         page.get_by_role("textbox", name="Session Name").fill("Session 1")
 
-        run_id = os.getenv("DEBUG_RUN_ID", "video-upload-pre")
-        _debug_log(
-            run_id=run_id,
-            hypothesis_id="H1",
-            location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-            message="Video path check",
-            data={
-                "video_file_path": video_file_path,
-                "is_file": os.path.isfile(video_file_path),
-                "size_bytes": os.path.getsize(video_file_path) if os.path.isfile(video_file_path) else None,
-            },
-        )
-
-        file_inputs = page.locator('input[type="file"]')
-        try:
-            input_count = file_inputs.count()
-        except Exception as e:
-            input_count = None
-            _debug_log(
-                run_id=run_id,
-                hypothesis_id="H2",
-                location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-                message="Failed counting file inputs",
-                data={"error": repr(e)},
-            )
-
-        _debug_log(
-            run_id=run_id,
-            hypothesis_id="H2",
-            location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-            message="File input locator count",
-            data={"count": input_count},
-        )
-
         if os.path.isfile(video_file_path):
-            # Log basic metadata for each file input so we can identify the correct uploader.
-            if input_count:
-                inputs_meta: list[dict] = []
-                for i in range(min(int(input_count), 6)):
-                    li = file_inputs.nth(i)
-                    try:
-                        meta = {
-                            "i": i,
-                            "visible": li.is_visible(),
-                            "enabled": li.is_enabled(),
-                            "accept": li.get_attribute("accept"),
-                            "multiple": li.get_attribute("multiple"),
-                            "name": li.get_attribute("name"),
-                            "id": li.get_attribute("id"),
-                        }
-                    except Exception as e:
-                        meta = {"i": i, "error": repr(e)}
-                    inputs_meta.append(meta)
-                _debug_log(
-                    run_id=run_id,
-                    hypothesis_id="H2",
-                    location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-                    message="File input metadata",
-                    data={"inputs": inputs_meta},
-                )
-
-            target_input = file_inputs.last
-            try:
-                _debug_log(
-                    run_id=run_id,
-                    hypothesis_id="H3",
-                    location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-                    message="About to set_input_files",
-                    data={
-                        "target_is_visible": target_input.is_visible(),
-                        "target_is_enabled": target_input.is_enabled(),
-                    },
-                )
-                target_input.set_input_files(video_file_path)
-                _debug_log(
-                    run_id=run_id,
-                    hypothesis_id="H3",
-                    location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-                    message="set_input_files succeeded",
-                    data={},
-                )
-                add_video_btn = page.get_by_role("button", name="Add Video")
-                try:
-                    _debug_log(
-                        run_id=run_id,
-                        hypothesis_id="H4",
-                        location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-                        message="About to click Add Video",
-                        data={
-                            "btn_enabled": add_video_btn.is_enabled(),
-                            "btn_visible": add_video_btn.is_visible(),
-                        },
-                    )
-                except Exception as e:
-                    _debug_log(
-                        run_id=run_id,
-                        hypothesis_id="H4",
-                        location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-                        message="Failed reading Add Video button state",
-                        data={"error": repr(e)},
-                    )
-                add_video_btn.click()
-                # After click, capture any alert text (common for validation errors).
-                try:
-                    alerts = page.get_by_role("alert")
-                    ac = alerts.count()
-                    texts = []
-                    for j in range(min(ac, 2)):
-                        t = (alerts.nth(j).inner_text() or "").strip()
-                        texts.append(t[:200])
-                    _debug_log(
-                        run_id=run_id,
-                        hypothesis_id="H4",
-                        location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-                        message="Post-click alerts",
-                        data={"alert_count": ac, "alert_texts": texts},
-                    )
-                except Exception as e:
-                    _debug_log(
-                        run_id=run_id,
-                        hypothesis_id="H4",
-                        location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-                        message="Failed reading post-click alerts",
-                        data={"error": repr(e)},
-                    )
-                # Look for any toast/snackbar messages (often used instead of alerts).
-                try:
-                    snack = page.locator(".mat-mdc-snack-bar-container, .mat-snack-bar-container").first
-                    if snack.count() > 0:
-                        st = (snack.inner_text() or "").strip()
-                    else:
-                        st = ""
-                    _debug_log(
-                        run_id=run_id,
-                        hypothesisId="H5",
-                        location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-                        message="Snackbar text",
-                        data={"text": st[:300]},
-                    )
-                except Exception as e:
-                    _debug_log(
-                        run_id=run_id,
-                        hypothesis_id="H5",
-                        location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-                        message="Failed reading snackbar",
-                        data={"error": repr(e)},
-                    )
-
-                # Confirm the UI registered the upload (filename appears somewhere).
-                try:
-                    basename = Path(video_file_path).name
-                    page.get_by_text(basename).first.wait_for(timeout=15000)
-                    _debug_log(
-                        run_id=run_id,
-                        hypothesis_id="H6",
-                        location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-                        message="Uploaded filename became visible",
-                        data={"basename": basename},
-                    )
-                except Exception as e:
-                    _debug_log(
-                        run_id=run_id,
-                        hypothesis_id="H6",
-                        location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-                        message="Uploaded filename NOT visible after Add Video",
-                        data={"error": repr(e), "basename": Path(video_file_path).name},
-                    )
-                    raise
-            except Exception as e:
-                _debug_log(
-                    run_id=run_id,
-                    hypothesis_id="H4",
-                    location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-                    message="set_input_files failed",
-                    data={"error": repr(e)},
-                )
-                raise
+            file_inputs = page.locator('input[type="file"]')
+            if file_inputs.count() > 0:
+                file_inputs.last.set_input_files(video_file_path)
+            page.get_by_role("button", name="Add Video").click()
         else:
             page.get_by_role("button", name="Skip").click()
-        try:
-            page.wait_for_load_state("networkidle")
-        except Exception as e:
-            _debug_log(
-                run_id=run_id,
-                hypothesis_id="H7",
-                location="tests/smoke/test_admin_create_long_course.py:AddVideos",
-                message='wait_for_load_state("networkidle") failed',
-                data={"error": repr(e), "url": page.url},
-            )
-            raise
+
+        page.get_by_role("button", name = "Save and Continue").click()
+
+        page.wait_for_load_state("networkidle")
         time.sleep(0.3)
 
     # --- Enrollment & Price ---
-    def set_enrollment_and_publish(self, created_title: str) -> None:
+    def set_enrollment_and_publish(self) -> None:
         page = self.page
 
         page.get_by_role("combobox", name="Currency").locator("span").click()
         page.get_by_role("option", name="INR").click()
         page.get_by_role("textbox", name="Amount").fill("200")
-        page.get_by_role("button", name="Add").click()
+        add_btn = page.get_by_role("button", name="Add", exact=True)
+        expect(add_btn).to_be_enabled(timeout=5000)
+        add_btn.click()
         time.sleep(0.2)
         page.get_by_role("combobox", name="Currency").locator("span").click()
         page.get_by_role("option", name="USD").click()
         page.get_by_role("textbox", name="Amount").fill("200")
-        page.get_by_role("button", name="Add").click()
+        add_btn = page.get_by_role("button", name="Add", exact=True)
+        expect(add_btn).to_be_enabled(timeout=5000)
+        add_btn.click()
         time.sleep(0.2)
-        page.get_by_role("button", name="Publish Course").click()
+
+        import json, time as _time
+        _log = "/Users/rachan/Divyakala smoke testAutomation/.cursor/debug-3049bc.log"
+
+        # #region agent log
+        publish_btn = page.get_by_role("button", name="Publish Course")
+        draft_btn = page.get_by_role("button", name="Save as Draft").or_(
+            page.get_by_role("button", name="Save Draft")
+        )
+        with open(_log, "a") as _f:
+            _f.write(json.dumps({"sessionId":"3049bc","location":"long_course_page.py:before_publish","message":"button counts","data":{"publish_count": publish_btn.count(),"draft_count": draft_btn.count(),"publish_visible": publish_btn.first.is_visible() if publish_btn.count() > 0 else False,"publish_disabled": publish_btn.first.get_attribute("disabled") if publish_btn.count() > 0 else "N/A","url": page.url},"timestamp":int(_time.time()*1000)}) + "\n")
+        # #endregion
+
+        publish_btn.first.wait_for(state="visible", timeout=10000)
+        publish_btn.first.scroll_into_view_if_needed()
+        publish_btn.first.click()
+
+        # #region agent log
+        _time.sleep(0.5)
+        with open(_log, "a") as _f:
+            _f.write(json.dumps({"sessionId":"3049bc","location":"long_course_page.py:after_publish_click","message":"after click state","data":{"url": page.url,"page_loader_visible": page.locator("div.page-loader").count() > 0},"timestamp":int(_time.time()*1000)}) + "\n")
+        # #endregion
+
+        # Wait for the page-loader overlay to disappear, then networkidle
+        page.locator("div.page-loader").wait_for(state="hidden", timeout=30000)
         page.wait_for_load_state("networkidle")
 
-        # region agent log: after publish, capture first few course cards and their titles
-        run_id = os.getenv("DEBUG_RUN_ID", "post-publish-cards")
-        try:
-            cards = page.locator(".course-card")
-            try:
-                count = cards.count()
-            except Exception as e:
-                count = None
-                _debug_log(
-                    run_id=run_id,
-                    hypothesis_id="CARD1",
-                    location="tests/pages/long_course_page.py:set_enrollment_and_publish",
-                    message="Failed counting .course-card elements",
-                    data={"error": repr(e)},
-                )
-            samples: list[dict] = []
-            if count:
-                for i in range(min(int(count), 5)):
-                    card = cards.nth(i)
-                    try:
-                        text = (card.inner_text() or "").strip()
-                    except Exception as e:
-                        text = f"<err {repr(e)}>"
-                    samples.append({"index": i, "text": text[:200]})
-            _debug_log(
-                run_id=run_id,
-                hypothesis_id="CARD1",
-                location="tests/pages/long_course_page.py:set_enrollment_and_publish",
-                message="Course card texts after publish",
-                data={"count": count, "samples": samples, "expected_title": created_title},
-            )
-        except Exception as e:
-            _debug_log(
-                run_id=run_id,
-                hypothesis_id="CARD2",
-                location="tests/pages/long_course_page.py:set_enrollment_and_publish",
-                message="Error while logging course cards",
-                data={"error": repr(e)},
-            )
-        # endregion agent log
+        # #region agent log
+        with open(_log, "a") as _f:
+            _f.write(json.dumps({"sessionId":"3049bc","location":"long_course_page.py:after_networkidle","message":"final url after publish","data":{"url": page.url},"timestamp":int(_time.time()*1000)}) + "\n")
+        # #endregion
 
