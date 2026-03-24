@@ -3,7 +3,17 @@ from typing import Optional
 
 from playwright.sync_api import Page, expect
 
-from config import ADMIN_EMAIL as _DEFAULT_EMAIL, ADMIN_PASSWORD, BASE_URL, MANUAL_OTP_WAIT_SECONDS, TEST_OTP
+from config import (
+    ADMIN_EMAIL as _DEFAULT_EMAIL,
+    ADMIN_PASSWORD,
+    BASE_URL,
+    MANUAL_OTP_WAIT_SECONDS,
+    TEST_OTP,
+    USER_EMAIL,
+    USER_MANUAL_OTP_WAIT_SECONDS,
+    USER_PASSWORD,
+    USER_TEST_OTP,
+)
 
 
 def sign_out(page: Page, base_url: Optional[str] = None) -> None:
@@ -65,7 +75,7 @@ def login_as_admin(
         continue_btn.click()
 
     if manual_otp:
-        _login_manual_otp(page, wait_for_navigation)
+        _login_manual_otp(page, wait_for_navigation, timeout_seconds=MANUAL_OTP_WAIT_SECONDS)
         return
 
     # Wait for next step: either Password or OTP
@@ -109,7 +119,12 @@ def login_as_admin(
         page.wait_for_url(lambda url: "dashboard" in url or "landing" in url, timeout=20000)
 
 
-def _login_manual_otp(page: Page, wait_for_navigation: bool) -> None:
+def _login_manual_otp(
+    page: Page,
+    wait_for_navigation: bool,
+    *,
+    timeout_seconds: int = MANUAL_OTP_WAIT_SECONDS,
+) -> None:
     """Wait for OTP step, then wait for Continue/Verify to become enabled (after you enter OTP), then click."""
     otp_input = (
         page.get_by_label("OTP", exact=False)
@@ -125,9 +140,99 @@ def _login_manual_otp(page: Page, wait_for_navigation: bool) -> None:
         .or_(page.get_by_role("button", name="Submit"))
         .or_(page.get_by_role("button", name="Continue"))
     )
-    timeout_ms = MANUAL_OTP_WAIT_SECONDS * 1000
+    timeout_ms = timeout_seconds * 1000
     expect(submit.first).to_be_enabled(timeout=timeout_ms)
     submit.first.click()
     if wait_for_navigation:
         # App redirects to /landing/lms/courses or **/dashboard**
         page.wait_for_url("**/landing/**", timeout=20000)
+
+
+def login_as_user(
+    page: Page,
+    email: Optional[str] = None,
+    password: Optional[str] = None,
+    *,
+    manual_otp: bool = False,
+    base_path: str = "/auth/sign-in",
+    wait_for_navigation: bool = True,
+) -> None:
+    """
+    Log in as a learner user (email + password or OTP).
+
+    Supports:
+    - Password login (set USER_PASSWORD)
+    - OTP login (set USER_TEST_OTP)
+    - Manual OTP entry in browser (set manual_otp=True)
+    """
+    # Use full URL so we always hit the org set in config (not a cached context base_url)
+    path = base_path if base_path.startswith("http") else f"{BASE_URL.rstrip('/')}{base_path if base_path.startswith('/') else '/' + base_path}"
+    page.goto(path)
+    page.wait_for_load_state("networkidle")
+
+    login_email = (email or USER_EMAIL).strip()
+    if not login_email:
+        raise ValueError("USER_EMAIL must be set in config.py or .env for user purchase tests.")
+
+    password_val = password or USER_PASSWORD
+    otp_val = USER_TEST_OTP
+
+    # Email step: fill Email ID
+    email_input = (
+        page.get_by_label("Email ID", exact=False).or_(page.get_by_placeholder("Email ID"))
+    )
+    email_input.wait_for(state="visible", timeout=10000)
+    email_input.fill(login_email)
+
+    # Decide flow BEFORE clicking anything else:
+    if manual_otp or (not password_val and otp_val):
+        continue_btn = (
+            page.get_by_role("button", name="Continue")
+            .or_(page.get_by_role("button", name="Next"))
+            .first
+        )
+        continue_btn.wait_for(state="visible", timeout=10000)
+        expect(continue_btn).to_be_enabled(timeout=10000)
+        continue_btn.click()
+
+    if manual_otp:
+        _login_manual_otp(page, wait_for_navigation, timeout_seconds=USER_MANUAL_OTP_WAIT_SECONDS)
+        return
+
+    # Wait for next step: either Password or OTP
+    if password_val:
+        pwd_input = (
+            page.get_by_label("Password", exact=False)
+            .or_(page.get_by_placeholder("Password"))
+            .or_(page.get_by_role("textbox", name="Password"))
+        )
+        pwd_input.first.wait_for(state="visible", timeout=15000)
+        pwd_input.first.fill(password_val)
+        submit = (
+            page.get_by_role("button", name="Sign in")
+            .or_(page.get_by_role("button", name="Login"))
+            .or_(page.get_by_role("button", name="Continue"))
+            .or_(page.get_by_role("button", name="Submit"))
+        )
+        submit.first.click()
+    elif otp_val:
+        otp_input = (
+            page.get_by_label("OTP", exact=False)
+            .or_(page.get_by_placeholder("OTP"))
+            .or_(page.get_by_placeholder("Enter OTP"))
+        )
+        otp_input.first.wait_for(state="visible", timeout=15000)
+        otp_input.first.fill(otp_val)
+        submit = (
+            page.get_by_role("button", name="Verify")
+            .or_(page.get_by_role("button", name="Submit"))
+            .or_(page.get_by_role("button", name="Continue"))
+        )
+        submit.first.click()
+    else:
+        raise ValueError(
+            "User login requires USER_PASSWORD or USER_TEST_OTP. Or set manual_otp=True for manual OTP entry."
+        )
+
+    if wait_for_navigation:
+        page.wait_for_url(lambda url: "dashboard" in url or "landing" in url, timeout=20000)

@@ -35,6 +35,19 @@ ADMIN_EMAIL = _env("ADMIN_EMAIL", "rachan@zupaloop.com")
 ADMIN_PASSWORD = _env("ADMIN_PASSWORD", "password")  # optional; use for password login
 TEST_OTP = _env("TEST_OTP", "")  # optional; use for automatic OTP
 
+# -----------------------------------------------------------------------------
+# Learner (user) credentials
+# -----------------------------------------------------------------------------
+# Used for "user purchase" smoke tests.
+# Provide these in `.env` (ignored by git) or environment variables.
+USER_EMAIL = _env("USER_EMAIL", "")
+USER_PASSWORD = _env("USER_PASSWORD", "")  # optional; use for password login
+USER_TEST_OTP = _env("USER_TEST_OTP", "")  # optional; use for automatic OTP
+
+# Manual OTP: test fills email and clicks Continue; you enter OTP in browser.
+USER_MANUAL_OTP = _env("USER_MANUAL_OTP", "false").lower() in ("1", "true", "yes")
+USER_MANUAL_OTP_WAIT_SECONDS = int(_env("USER_MANUAL_OTP_WAIT_SECONDS", "90") or "90")
+
 # Manual OTP: test fills email and clicks Continue; you enter OTP in browser.
 MANUAL_OTP = _env("MANUAL_OTP", "false").lower() in ("1", "true", "yes")
 MANUAL_OTP_WAIT_SECONDS = int(_env("MANUAL_OTP_WAIT_SECONDS", "90") or "90")

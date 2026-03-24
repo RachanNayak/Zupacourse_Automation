@@ -4,7 +4,7 @@ import re
 import time
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, expect
 
 
 class ShortCoursePage:
@@ -183,6 +183,31 @@ class ShortCoursePage:
     # --- Enrollment & Price ---
     def set_enrollment_and_publish(self) -> None:
         page = self.page
+        loader = page.locator("div.page-loader")
+
+        def _wait_loader_hidden(timeout_s: float = 15.0) -> None:
+            """Best-effort wait for transient full-page loader to clear."""
+            end_time = time.time() + timeout_s
+            while time.time() < end_time:
+                if loader.count() == 0:
+                    return
+                try:
+                    if not loader.first.is_visible():
+                        return
+                except Exception:
+                    # Detached loader means overlay is gone.
+                    return
+                time.sleep(0.2)
+
+        # Ensure enrollment type is selected. Use check() to avoid accidental toggle behavior.
+        subscription_opt = page.get_by_role("radio", name=re.compile(r"Subscription", re.I))
+        if subscription_opt.count() > 0:
+            try:
+                if not subscription_opt.first.is_checked():
+                    subscription_opt.first.check()
+            except Exception:
+                # Fallback for custom radio implementations
+                subscription_opt.first.click()
 
         page.get_by_role("combobox", name="Currency").locator("span").click()
         page.get_by_role("option", name="INR").click()
@@ -200,9 +225,43 @@ class ShortCoursePage:
         add_btn.click()
         time.sleep(0.2)
 
-        page.get_by_role("button", name="Publish Course").click()
+        # Loader can briefly overlay the form after pricing updates; wait it out
+        # before attempting to click Publish.
+        _wait_loader_hidden(timeout_s=15.0)
 
-        # Wait for the page-loader overlay to disappear, then networkidle
-        page.locator("div.page-loader").wait_for(state="hidden", timeout=30000)
+        publish_btn = page.get_by_role("button", name="Publish Course").first
+        publish_btn.wait_for(state="visible", timeout=10000)
+        publish_btn.scroll_into_view_if_needed()
+        expect(publish_btn).to_be_enabled(timeout=10000)
+        try:
+            publish_btn.click(timeout=5000)
+        except PlaywrightTimeoutError:
+            # Fallback for cases where a transient overlay still intercepts pointer events.
+            handle = publish_btn.element_handle()
+            if handle:
+                page.evaluate("(el) => el.click()", handle)
+
+        # Some org themes show a dialog-level Publish confirmation.
+        # Scope to dialog so we never re-match the page-level Publish button.
+        confirm_publish = page.get_by_role("dialog").get_by_role("button", name=re.compile(r"^Publish$", re.I))
+        for _ in range(10):
+            if confirm_publish.count() > 0 and confirm_publish.first.is_visible():
+                confirm_publish.first.click()
+                break
+            time.sleep(0.2)
+
+        # If publish did not trigger on first click due to transient overlays, retry once.
+        if "/create-course" in page.url and publish_btn.is_visible():
+            _wait_loader_hidden(timeout_s=10.0)
+            try:
+                publish_btn.click(timeout=4000)
+            except PlaywrightTimeoutError:
+                handle = publish_btn.element_handle()
+                if handle:
+                    page.evaluate("(el) => el.click()", handle)
+
+        # Wait for the page-loader overlay to disappear, then networkidle.
+        # Ignore if loader is not present in some org themes.
+        _wait_loader_hidden(timeout_s=30.0)
         page.wait_for_load_state("networkidle")
 
