@@ -54,19 +54,29 @@ class UserPurchasePage:
         """Select the latest published short course card from UI."""
         return self.select_nth_published_short_course(nth_index=0)
 
+    def _apply_short_course_dropdown_filter(self) -> None:
+        """Apply filter strictly as: All -> Short Courses."""
+        self.page.locator("body").click()
+        all_filter = self.page.get_by_role("combobox", name="All").first
+        expect(all_filter).to_be_visible(timeout=10000)
+        try:
+            all_filter.locator("svg").first.click()
+        except Exception:
+            all_filter.click()
+
+        short_option = self.page.get_by_text("Short Courses").first
+        expect(short_option).to_be_visible(timeout=10000)
+        short_option.click()
+        self.page.wait_for_load_state("networkidle")
+
     def select_nth_published_short_course(self, *, nth_index: int, exclude_title: str | None = None) -> str:
         """
         Select the Nth published short course card from UI (0-based).
 
         Excludes any card with a visible unpublished badge, and optionally excludes `exclude_title`.
         """
-        # Switch to Short Courses tab if present (scoped to tab role to avoid combobox spans).
-        short_tab = self.page.get_by_role("tab", name="Short Courses").or_(
-            self.page.get_by_role("button", name="Short Courses")
-        )
-        if short_tab.count() > 0:
-            short_tab.first.click()
-            self.page.wait_for_load_state("networkidle")
+        # Strict order requested: never click any course before this filter is applied.
+        self._apply_short_course_dropdown_filter()
 
         cards = self.page.locator("mat-card, [class*='course-card'], [class*='course_card'], app-course-card")
         cards.first.wait_for(state="visible", timeout=20000)
@@ -80,6 +90,16 @@ class UserPurchasePage:
             badge = card.locator("[class*='unpublished-badge']").first
             if badge.count() > 0 and badge.is_visible():
                 continue
+            # Skip cards that are already enrolled (green "Enrolled" tag on top-right).
+            # Use class-based locator from DOM: .enrolled-badge
+            enrolled_badge = card.locator("[class*='enrolled-badge']").first
+            if enrolled_badge.count() > 0 and enrolled_badge.is_visible():
+                continue
+            # Fallback for themes that render tag text without the class.
+            # Use strict text so we do NOT match strings like "Not Enrolled".
+            enrolled_text = card.get_by_text(re.compile(r"^\s*Enrolled\s*$", re.I)).first
+            if enrolled_text.count() > 0 and enrolled_text.is_visible():
+                continue
 
             title = self._extract_course_title_from_card(card)
             if not title:
@@ -89,13 +109,22 @@ class UserPurchasePage:
                 continue
 
             if published_seen == nth_index:
-                # Click the card/title element to open details.
-                # Avoid matching by extracted text; themes/truncation can make it brittle.
+                # Click the course card with the requested codegen sequence:
+                # `.thumb` first -> title -> card container.
                 title_el = card.locator(
                     "mat-card-title, h1, h2, h3, [class*='course-title'], [class*='title'], [class*='heading']"
                 ).first
+                thumb_el = card.locator(".thumb, [class*='thumb'], img, [class*='image']").first
 
                 def _click_card_to_open_details() -> None:
+                    try:
+                        if thumb_el.count() > 0:
+                            thumb_el.wait_for(state="visible", timeout=5000)
+                            thumb_el.scroll_into_view_if_needed()
+                            thumb_el.click()
+                            return
+                    except Exception:
+                        pass
                     try:
                         if title_el.count() > 0:
                             title_el.wait_for(state="visible", timeout=5000)
@@ -137,6 +166,22 @@ class UserPurchasePage:
                 if not opened:
                     pytest.fail(f"Selected course card but course details UI didn't open. title={title!r} url={self.page.url}")
 
+                # If this opened an already-enrolled course details page (no Enroll Now),
+                # continue scanning for the next non-enrolled/purchasable card.
+                enroll_btn = self.page.get_by_role("button", name=re.compile(r"Enroll\\s*Now", re.I)).first
+                enrolled_tag = self.page.get_by_text(re.compile(r"Enrolled", re.I)).first
+                enroll_visible = enroll_btn.count() > 0 and enroll_btn.is_visible()
+                enrolled_visible = enrolled_tag.count() > 0 and enrolled_tag.is_visible()
+                if (not enroll_visible) and enrolled_visible:
+                    # Return to listing and keep scanning for a purchasable course.
+                    self.go_to_courses_landing()
+                    # Re-apply the same required filter sequence.
+                    self._apply_short_course_dropdown_filter()
+                    cards = self.page.locator("mat-card, [class*='course-card'], [class*='course_card'], app-course-card")
+                    cards.first.wait_for(state="visible", timeout=20000)
+                    published_seen += 1
+                    continue
+
                 self.selected_course_title = title
                 try:
                     self.page.wait_for_load_state("networkidle")
@@ -165,56 +210,33 @@ class UserPurchasePage:
         return None
 
     def enroll_inr_one_time_and_proceed(self) -> None:
-        """Enroll user in a short course (INR One-Time) and go to payment."""
-        # Depending on UI variant, we might need to open course details first.
-        details_btn = self.page.get_by_role("button", name=re.compile(r"Course\s*Details", re.I)).first
+        """Enroll user in a short course and proceed to payment (codegen style)."""
+        enroll_btn = self.page.get_by_role("button", name="Enroll Now").first
+        expect(enroll_btn).to_be_visible(timeout=30000)
+        enroll_btn.click()
 
-        def _try_click_enroll() -> bool:
-            # UI label variants across org themes.
-            patterns = [
-                r"Enroll\s*Now",
-                r"\bEnroll\b",
-                r"\bJoin\b",
-            ]
-            for pat in patterns:
-                loc = self.page.get_by_role("button", name=re.compile(pat, re.I)).first
-                if loc.count() > 0 and loc.is_visible():
-                    loc.click()
-                    return True
-            return False
-
-        # First try without extra navigation.
-        if not _try_click_enroll():
-            # Try opening "Course Details", then retry.
-            if details_btn.count() > 0 and details_btn.is_visible():
-                details_btn.click()
-                self.page.wait_for_load_state("networkidle")
-            # Re-click selected title (if we navigated back or modal didn't open).
-            elif self.selected_course_title:
-                try:
-                    self.page.get_by_text(self.selected_course_title, exact=False).first.click()
-                    self.page.wait_for_load_state("networkidle")
-                except Exception:
-                    pass
-
-        # Retry with a hard wait, but using the variants above.
-        deadline = time.time() + 30000
-        while time.time() < deadline:
-            if _try_click_enroll():
-                break
-            time.sleep(0.5)
-        else:
-            pytest.fail("Could not find an enroll/join button after selecting the course.")
-
-        # Currency selection (UI varies; we match INR text)
-        self.page.get_by_text(re.compile(r"\bINR\b", re.I)).first.click()
+        # Codegen sequence uses full label text.
+        self.page.get_by_text("INR ( Indian Rupees )").first.click()
         self.page.get_by_role("button", name="Next").first.click()
-
-        expect(self.page.get_by_text(re.compile(r"One-Time Payment", re.I))).to_be_visible(timeout=20000)
         self.page.get_by_role("button", name=re.compile(r"Proceed to Payment", re.I)).first.click()
 
+    def collect_selection_enroll_diagnostics(self) -> str:
+        """Return compact diagnostics around selection->enroll boundary."""
+        details_btn = self.page.get_by_role("button", name=re.compile(r"Course\s*Details", re.I)).first
+        enroll_now_btn = self.page.get_by_role("button", name=re.compile(r"Enroll\s*Now", re.I)).first
+        enroll_btn = self.page.get_by_role("button", name=re.compile(r"\bEnroll\b", re.I)).first
+        join_btn = self.page.get_by_role("button", name=re.compile(r"\bJoin\b", re.I)).first
+        return (
+            f"url={self.page.url}\n"
+            f"selected_course_title={self.selected_course_title}\n"
+            f"course_details_visible={details_btn.count() > 0 and details_btn.is_visible()}\n"
+            f"enroll_now_visible={enroll_now_btn.count() > 0 and enroll_now_btn.is_visible()}\n"
+            f"enroll_visible={enroll_btn.count() > 0 and enroll_btn.is_visible()}\n"
+            f"join_visible={join_btn.count() > 0 and join_btn.is_visible()}\n"
+        )
+
     def complete_razorpay_upi_success(self, *, contact_number: str, vpa_success: str) -> None:
-        """Complete Razorpay UPI payment using success path fields."""
+        """Complete Razorpay UPI payment using codegen-like UPI path."""
         razor_frame = self._select_razorpay_iframe_with_field("contactNumber")
         if razor_frame is None:
             pytest.fail("Could not find Razorpay iframe containing contactNumber field.")
@@ -226,6 +248,9 @@ class UserPurchasePage:
         vpa_input = razor_frame.get_by_placeholder("example@okhdfcbank")
         vpa_input.click()
         vpa_input.fill(vpa_success)
+        # Codegen flow: choose the '@razorpay' suggestion option.
+        vpa_input.press("ArrowDown")
+        razor_frame.get_by_role("button", name="@razorpay").click()
         razor_frame.get_by_test_id("vpa-submit").click()
 
         # Wait for success page controls to show up.

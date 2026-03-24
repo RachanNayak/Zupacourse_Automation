@@ -38,6 +38,11 @@ def test_user_purchase_short_course(page: Page) -> None:
         user_title = user_purchase.select_latest_published_short_course()
         allure.dynamic.title(f"User purchases short course: {user_title}")
         allure.attach(user_title, name="Selected course title", attachment_type=allure.attachment_type.TEXT)
+        allure.attach(
+            user_purchase.collect_selection_enroll_diagnostics(),
+            name="Selection/enroll diagnostics (after card open)",
+            attachment_type=allure.attachment_type.TEXT,
+        )
 
     with allure.step("Enroll and proceed to payment"):
         user_purchase.enroll_inr_one_time_and_proceed()

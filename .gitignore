@@ -9,3 +9,18 @@ playwright-report/
 test-results/
 *.log
 .cursor/
+
+# Local OS/system files
+.DS_Store
+
+# Generated reports and run artifacts
+allure-results/
+allure-report/
+artifacts/
+
+# Local documents
+*.pdf
+
+# Keep large fixture media local-only to avoid GitHub size limits
+tests/fixtures/images/
+tests/fixtures/videos/
