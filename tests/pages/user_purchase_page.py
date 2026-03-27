@@ -215,7 +215,7 @@ class UserPurchasePage:
         expect(enroll_btn).to_be_visible(timeout=30000)
         enroll_btn.click()
 
-        # Codegen sequence uses full label text.
+        # Codegen sequence uses full label text.  
         self.page.get_by_text("INR ( Indian Rupees )").first.click()
         self.page.get_by_role("button", name="Next").first.click()
         self.page.get_by_role("button", name=re.compile(r"Proceed to Payment", re.I)).first.click()
