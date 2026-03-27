@@ -30,6 +30,7 @@ def test_user_purchase_short_course(page: Page) -> None:
     user_purchase = UserPurchasePage(page)
 
     with allure.step("Login as learner user"):
+        # Keep login behavior aligned with admin course-creation flow.
         login_as_user(page, email=USER_EMAIL, manual_otp=USER_MANUAL_OTP, wait_for_navigation=True)
         # Ensure user is on landing/courses
         user_purchase.go_to_courses_landing()

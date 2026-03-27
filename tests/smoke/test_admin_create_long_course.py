@@ -1,6 +1,7 @@
 """Smoke test: Can an admin create a Long Course? (Full flow using POM.)"""
 import os
 import random
+import re
 import time as _time
 from typing import Iterable, Optional
 
@@ -141,9 +142,9 @@ def test_admin_create_long_course(page: Page) -> None:
             expect(img_tag.first).to_be_visible()
         elif bg_img.count() > 0:
             expect(bg_img.first).to_be_visible()
-        # Author — must match the author selected during form fill
-        if course_info["author"]:
-            expect(course_card.get_by_text(course_info["author"], exact=False)).to_be_visible()
+        # Long course cards in this UI do not show author; validate per-term pricing instead.
+        expect(course_card).to_contain_text(re.compile(r"(₹\s*1,250(?:\.00)?)|(\b1,250(?:\.00)?\b.*term)", re.I))
+        expect(course_card).to_contain_text(re.compile(r"(\$\s*125(?:\.00)?)|(\b125(?:\.00)?\b.*term)", re.I))
 
     with allure.step("Verify course is PUBLISHED (no unpublished badge on card)"):
         unpublished_badge = course_card.locator("[class*='unpublished-badge']")

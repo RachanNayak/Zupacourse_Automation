@@ -57,14 +57,25 @@ class UserPurchasePage:
     def _apply_short_course_dropdown_filter(self) -> None:
         """Apply filter strictly as: All -> Short Courses."""
         self.page.locator("body").click()
-        all_filter = self.page.get_by_role("combobox", name="All").first
-        expect(all_filter).to_be_visible(timeout=10000)
-        try:
-            all_filter.locator("svg").first.click()
-        except Exception:
-            all_filter.click()
+        # Prefer explicit "All Courses" trigger from latest UI.
+        all_courses_text = self.page.get_by_text("All Courses").first
+        if all_courses_text.count() > 0 and all_courses_text.is_visible():
+            all_courses_text.click()
+        else:
+            all_filter = self.page.get_by_role("combobox", name=re.compile(r"All|All Courses", re.I)).first
+            if all_filter.count() > 0 and all_filter.is_visible():
+                try:
+                    all_filter.locator("svg").first.click()
+                except Exception:
+                    all_filter.click()
+            else:
+                mat_value = self.page.locator("[id^='mat-select-value-']").first
+                if mat_value.count() > 0 and mat_value.is_visible():
+                    mat_value.click()
 
-        short_option = self.page.get_by_text("Short Courses").first
+        short_option = self.page.get_by_role("option", name=re.compile(r"Short\s*Courses?", re.I)).first
+        if short_option.count() == 0:
+            short_option = self.page.get_by_text(re.compile(r"Short\s*Courses?", re.I)).first
         expect(short_option).to_be_visible(timeout=10000)
         short_option.click()
         self.page.wait_for_load_state("networkidle")
@@ -215,8 +226,11 @@ class UserPurchasePage:
         expect(enroll_btn).to_be_visible(timeout=30000)
         enroll_btn.click()
 
-        # Codegen sequence uses full label text.  
-        self.page.get_by_text("INR ( Indian Rupees )").first.click()
+        inr_radio = self.page.get_by_role("radio", name=re.compile(r"INR\s*\(\s*Indian Rupees\s*\)", re.I)).first
+        if inr_radio.count() > 0 and inr_radio.is_visible():
+            inr_radio.check()
+        else:
+            self.page.get_by_text("INR ( Indian Rupees )").first.click()
         self.page.get_by_role("button", name="Next").first.click()
         self.page.get_by_role("button", name=re.compile(r"Proceed to Payment", re.I)).first.click()
 
@@ -282,7 +296,20 @@ class UserPurchasePage:
 
         self.page.get_by_text("My Courses").first.click()
         expected_title = self._normalize_title_for_assertion(user_title)
-        expect(self.page.get_by_text(expected_title, exact=False)).to_be_visible(timeout=30000)
+        my_course_card = self.page.locator("mat-card, [class*='course-card'], [class*='course_card'], app-course-card").filter(
+            has=self.page.get_by_text(expected_title, exact=False)
+        ).first
+        expect(my_course_card).to_be_visible(timeout=30000)
+        my_course_card.click()
+
+        my_view_course_btn = self.page.get_by_role("button", name="View Course").first
+        expect(my_view_course_btn).to_be_visible(timeout=30000)
+        my_view_course_btn.click()
+
+        try:
+            self.page.locator("app-video-title").get_by_role("img").first.click()
+        except Exception:
+            pass
 
         return enrolled_visible
 

@@ -257,50 +257,115 @@ class LongCoursePage:
     # --- Enrollment & Price ---
     def set_enrollment_and_publish(self) -> None:
         page = self.page
+        loader = page.locator("div.page-loader")
 
-        page.get_by_role("combobox", name="Currency").locator("span").click()
-        page.get_by_role("option", name="INR").click()
-        page.get_by_role("textbox", name="Amount").fill("200")
-        add_btn = page.get_by_role("button", name="Add", exact=True)
-        expect(add_btn).to_be_enabled(timeout=5000)
-        add_btn.click()
-        time.sleep(0.2)
-        page.get_by_role("combobox", name="Currency").locator("span").click()
-        page.get_by_role("option", name="USD").click()
-        page.get_by_role("textbox", name="Amount").fill("200")
-        add_btn = page.get_by_role("button", name="Add", exact=True)
-        expect(add_btn).to_be_enabled(timeout=5000)
-        add_btn.click()
-        time.sleep(0.2)
+        def _wait_loader_hidden(timeout_s: float = 15.0) -> None:
+            """Best-effort wait for transient full-page loader to clear."""
+            end_time = time.time() + timeout_s
+            while time.time() < end_time:
+                if loader.count() == 0:
+                    return
+                try:
+                    if not loader.first.is_visible():
+                        return
+                except Exception:
+                    return
+                time.sleep(0.2)
 
-        import json, time as _time
-        _log = "/Users/rachan/Divyakala smoke testAutomation/.cursor/debug-3049bc.log"
+        # Ensure Subscription Enrollment checkbox is checked.
+        subscription_checkbox = page.get_by_role("checkbox", name=re.compile(r"Subscription Enrollment", re.I)).first
+        expect(subscription_checkbox).to_be_visible(timeout=10000)
+        try:
+            if not subscription_checkbox.is_checked():
+                subscription_checkbox.check()
+        except Exception:
+            subscription_checkbox.click()
 
-        # #region agent log
-        publish_btn = page.get_by_role("button", name="Publish Course")
-        draft_btn = page.get_by_role("button", name="Save as Draft").or_(
-            page.get_by_role("button", name="Save Draft")
-        )
-        with open(_log, "a") as _f:
-            _f.write(json.dumps({"sessionId":"3049bc","location":"long_course_page.py:before_publish","message":"button counts","data":{"publish_count": publish_btn.count(),"draft_count": draft_btn.count(),"publish_visible": publish_btn.first.is_visible() if publish_btn.count() > 0 else False,"publish_disabled": publish_btn.first.get_attribute("disabled") if publish_btn.count() > 0 else "N/A","url": page.url},"timestamp":int(_time.time()*1000)}) + "\n")
-        # #endregion
+        # Select # Terms = 8
+        terms_combo = page.get_by_role("combobox", name=re.compile(r"#\s*Terms", re.I)).first
+        expect(terms_combo).to_be_visible(timeout=10000)
+        try:
+            terms_combo.locator("svg").first.click()
+        except Exception:
+            terms_combo.click()
+        page.get_by_role("option", name="8").first.click()
 
-        publish_btn.first.wait_for(state="visible", timeout=10000)
-        publish_btn.first.scroll_into_view_if_needed()
-        publish_btn.first.click()
+        def _add_price(currency: str, amount: str) -> None:
+            currency_combo = page.get_by_role("combobox", name=re.compile(r"Currency", re.I)).first
+            try:
+                currency_combo.locator("svg, path, span").first.click()
+            except Exception:
+                currency_combo.click()
+            page.get_by_role("option", name=currency).first.click()
+            amount_box = page.get_by_role("textbox", name=re.compile(r"Full Course Amount|Amount", re.I)).first
+            try:
+                amount_box.fill(amount)
+            except Exception:
+                # Some Material labels intercept pointer events during click/focus transitions.
+                # Force value through JS fallback and trigger input/change events.
+                handle = amount_box.element_handle()
+                if handle:
+                    page.evaluate(
+                        """(el, val) => {
+                            el.value = val;
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        }""",
+                        handle,
+                        amount,
+                    )
+            add_btn = page.get_by_role("button", name="Add", exact=True).first
+            expect(add_btn).to_be_enabled(timeout=5000)
+            add_btn.click()
+            time.sleep(0.2)
 
-        # #region agent log
-        _time.sleep(0.5)
-        with open(_log, "a") as _f:
-            _f.write(json.dumps({"sessionId":"3049bc","location":"long_course_page.py:after_publish_click","message":"after click state","data":{"url": page.url,"page_loader_visible": page.locator("div.page-loader").count() > 0},"timestamp":int(_time.time()*1000)}) + "\n")
-        # #endregion
+        # Add pricing rows.
+        _add_price("INR", "10000")
+        _add_price("USD", "1000")
 
-        # Wait for the page-loader overlay to disappear, then networkidle
-        page.locator("div.page-loader").wait_for(state="hidden", timeout=30000)
+        # Validate price breakup values in the right panel.
+        expect(page.get_by_text(re.compile(r"Term Fee \+ GST\s*₹1,250\.00", re.I))).to_be_visible(timeout=10000)
+        expect(page.get_by_text(re.compile(r"Sub Total \+ GST\s*₹10,000\.00", re.I))).to_be_visible(timeout=10000)
+        expect(page.get_by_text(re.compile(r"One-time registration fee\s*₹1,840\.00", re.I))).to_be_visible(timeout=10000)
+        expect(page.get_by_text(re.compile(r"Total fee\s*₹11,840\.00", re.I))).to_be_visible(timeout=10000)
+
+        expect(page.get_by_text(re.compile(r"Term Fee \+ GST\s*\$125\.00", re.I))).to_be_visible(timeout=10000)
+        expect(page.get_by_text(re.compile(r"Sub Total \+ GST\s*\$1,000\.00", re.I))).to_be_visible(timeout=10000)
+        expect(page.get_by_text(re.compile(r"One-time registration fee\s*\$20\.00", re.I))).to_be_visible(timeout=10000)
+        expect(page.get_by_text(re.compile(r"Total fee\s*\$1,020\.00", re.I))).to_be_visible(timeout=10000)
+
+        # Wait out transient overlays before publishing.
+        _wait_loader_hidden(timeout_s=15.0)
+
+        publish_btn = page.get_by_role("button", name="Publish Course").first
+        publish_btn.wait_for(state="visible", timeout=10000)
+        publish_btn.scroll_into_view_if_needed()
+        expect(publish_btn).to_be_enabled(timeout=10000)
+        try:
+            publish_btn.click(timeout=5000)
+        except PlaywrightTimeoutError:
+            handle = publish_btn.element_handle()
+            if handle:
+                page.evaluate("(el) => el.click()", handle)
+
+        # Some org themes show a dialog-level publish confirmation.
+        confirm_publish = page.get_by_role("dialog").get_by_role("button", name=re.compile(r"^Publish$", re.I))
+        for _ in range(10):
+            if confirm_publish.count() > 0 and confirm_publish.first.is_visible():
+                confirm_publish.first.click()
+                break
+            time.sleep(0.2)
+
+        # Retry once if still on create page.
+        if "/create-course" in page.url and publish_btn.is_visible():
+            _wait_loader_hidden(timeout_s=10.0)
+            try:
+                publish_btn.click(timeout=4000)
+            except PlaywrightTimeoutError:
+                handle = publish_btn.element_handle()
+                if handle:
+                    page.evaluate("(el) => el.click()", handle)
+
+        _wait_loader_hidden(timeout_s=30.0)
         page.wait_for_load_state("networkidle")
-
-        # #region agent log
-        with open(_log, "a") as _f:
-            _f.write(json.dumps({"sessionId":"3049bc","location":"long_course_page.py:after_networkidle","message":"final url after publish","data":{"url": page.url},"timestamp":int(_time.time()*1000)}) + "\n")
-        # #endregion
 
