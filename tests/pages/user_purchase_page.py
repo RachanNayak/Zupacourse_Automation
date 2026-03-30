@@ -54,37 +54,81 @@ class UserPurchasePage:
         """Select the latest published short course card from UI."""
         return self.select_nth_published_short_course(nth_index=0)
 
-    def _apply_short_course_dropdown_filter(self) -> None:
-        """Apply filter strictly as: All -> Short Courses."""
-        self.page.locator("body").click()
-        # Prefer explicit "All Courses" trigger from latest UI.
-        all_courses_text = self.page.get_by_text("All Courses").first
-        if all_courses_text.count() > 0 and all_courses_text.is_visible():
-            all_courses_text.click()
-        else:
-            all_filter = self.page.get_by_role("combobox", name=re.compile(r"All|All Courses", re.I)).first
-            if all_filter.count() > 0 and all_filter.is_visible():
-                try:
-                    all_filter.locator("svg").first.click()
-                except Exception:
-                    all_filter.click()
-            else:
-                mat_value = self.page.locator("[id^='mat-select-value-']").first
-                if mat_value.count() > 0 and mat_value.is_visible():
-                    mat_value.click()
+    def _click_all_courses_nav(self) -> None:
+        """After login: click 'All Courses' so the learner course listing is active."""
+        all_courses = self.page.get_by_text(re.compile(r"^All\s+Courses$", re.I)).first
+        if all_courses.count() == 0:
+            all_courses = self.page.get_by_role("link", name=re.compile(r"All\s+Courses", re.I)).first
+        if all_courses.count() > 0 and all_courses.is_visible():
+            all_courses.click()
+            try:
+                self.page.wait_for_load_state("networkidle")
+            except Exception:
+                pass
 
-        short_option = self.page.get_by_role("option", name=re.compile(r"Short\s*Courses?", re.I)).first
+    def _open_course_type_filter_and_select_short(self) -> None:
+        """
+        Top filter dropdown: All | Short Courses | Long Courses (mat-select).
+        Open it and choose Short Courses.
+        """
+        # Click the closed control showing "All" (mat-select trigger or combobox).
+        opened = False
+        mat_trigger = self.page.locator("[id^='mat-select-value-']").first
+        if mat_trigger.count() > 0 and mat_trigger.is_visible():
+            mat_trigger.click()
+            opened = True
+        if not opened:
+            combo = self.page.get_by_role("combobox", name=re.compile(r"^All$", re.I)).first
+            if combo.count() > 0 and combo.is_visible():
+                try:
+                    combo.locator("svg").first.click()
+                except Exception:
+                    combo.click()
+                opened = True
+        if not opened:
+            combo = self.page.get_by_role("combobox", name=re.compile(r"All", re.I)).first
+            if combo.count() > 0 and combo.is_visible():
+                try:
+                    combo.locator("svg").first.click()
+                except Exception:
+                    combo.click()
+                opened = True
+        if not opened:
+            pytest.fail("Could not open course-type filter (All / Short / Long).")
+
+        short_label = re.compile(r"^\s*Short\s*Courses?\s*$", re.I)
+        # Panel options are often mat-option with label in span.mdc-list-item__primary-text.
+        short_option = (
+            self.page.locator("mat-option").filter(has_text=short_label).first
+        )
         if short_option.count() == 0:
-            short_option = self.page.get_by_text(re.compile(r"Short\s*Courses?", re.I)).first
+            short_option = (
+                self.page.locator("span.mdc-list-item__primary-text").filter(has_text=short_label).first
+            )
+        if short_option.count() == 0:
+            short_option = self.page.get_by_role("option", name=re.compile(r"Short\s*Courses?", re.I)).first
+        if short_option.count() == 0:
+            short_option = self.page.get_by_text(short_label).first
         expect(short_option).to_be_visible(timeout=10000)
         short_option.click()
         self.page.wait_for_load_state("networkidle")
+        time.sleep(2)
+
+    def _apply_short_course_dropdown_filter(self) -> None:
+        """
+        User flow: (1) click All Courses, (2) open top filter, (3) select Short Courses.
+        Then iterate cards and skip any with Enrolled tag (handled in select_nth_*).
+        """
+        self._click_all_courses_nav()
+        self._open_course_type_filter_and_select_short()
 
     def select_nth_published_short_course(self, *, nth_index: int, exclude_title: str | None = None) -> str:
         """
-        Select the Nth published short course card from UI (0-based).
+        Select the Nth purchasable short course (0-based).
 
-        Excludes any card with a visible unpublished badge, and optionally excludes `exclude_title`.
+        Flow: All Courses -> filter Short Courses -> scan cards; skip unpublished and
+        any card showing an Enrolled tag (already purchased). Optionally skip
+        `exclude_title` for a second purchase.
         """
         # Strict order requested: never click any course before this filter is applied.
         self._apply_short_course_dropdown_filter()
@@ -101,14 +145,15 @@ class UserPurchasePage:
             badge = card.locator("[class*='unpublished-badge']").first
             if badge.count() > 0 and badge.is_visible():
                 continue
-            # Skip cards that are already enrolled (green "Enrolled" tag on top-right).
-            # Use class-based locator from DOM: .enrolled-badge
-            enrolled_badge = card.locator("[class*='enrolled-badge']").first
+            # Skip cards that are already purchased.
+            # Match your DOM variants: class="enrolled ..." and older enrolled-badge styles.
+            enrolled_badge = card.locator(
+                ".enrolled, [class~='enrolled'], [class*='enrolled-badge'], [class*='enrolled']"
+            ).first
             if enrolled_badge.count() > 0 and enrolled_badge.is_visible():
                 continue
-            # Fallback for themes that render tag text without the class.
-            # Use strict text so we do NOT match strings like "Not Enrolled".
-            enrolled_text = card.get_by_text(re.compile(r"^\s*Enrolled\s*$", re.I)).first
+            # Text fallback in case class names change.
+            enrolled_text = card.get_by_text(re.compile(r"\bEnrolled\b", re.I)).first
             if enrolled_text.count() > 0 and enrolled_text.is_visible():
                 continue
 
@@ -151,6 +196,7 @@ class UserPurchasePage:
                     # After opening details, we usually see one of these.
                     candidates = [
                         self.page.get_by_role("button", name=re.compile(r"Course\s*Details", re.I)).first,
+                        self.page.get_by_role("button", name=re.compile(r"Apply\s*Now", re.I)).first,
                         self.page.get_by_role("button", name=re.compile(r"Enroll\s*Now", re.I)).first,
                         self.page.get_by_role("button", name=re.compile(r"View\s*Course", re.I)).first,
                         self.page.get_by_text(re.compile(r"Enrolled", re.I)).first,
@@ -179,7 +225,7 @@ class UserPurchasePage:
 
                 # If this opened an already-enrolled course details page (no Enroll Now),
                 # continue scanning for the next non-enrolled/purchasable card.
-                enroll_btn = self.page.get_by_role("button", name=re.compile(r"Enroll\\s*Now", re.I)).first
+                enroll_btn = self.page.get_by_role("button", name=re.compile(r"(Apply|Enroll)\s*Now", re.I)).first
                 enrolled_tag = self.page.get_by_text(re.compile(r"Enrolled", re.I)).first
                 enroll_visible = enroll_btn.count() > 0 and enroll_btn.is_visible()
                 enrolled_visible = enrolled_tag.count() > 0 and enrolled_tag.is_visible()
@@ -206,25 +252,42 @@ class UserPurchasePage:
 
     def _select_razorpay_iframe_with_field(self, test_id: str):
         """Find the iframe that contains a given test id field (e.g., contactNumber)."""
-        iframes = self.page.locator("iframe")
-        self.page.wait_for_selector("iframe", timeout=30000)
-        max_iframes = min(iframes.count(), 6)
-        for i in range(max_iframes):
-            frame = iframes.nth(i).content_frame()
-            if not frame:
-                continue
-            try:
-                if frame.get_by_test_id(test_id).count() > 0:
-                    return frame
-            except Exception:
-                continue
+        self.page.wait_for_selector("iframe", timeout=45000)
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            iframes = self.page.locator("iframe")
+            max_iframes = min(iframes.count(), 10)
+            for i in range(max_iframes):
+                frame_loc = iframes.nth(i).content_frame
+                try:
+                    # Primary locator from codegen.
+                    field = frame_loc.get_by_test_id(test_id)
+                    if field.count() > 0:
+                        field.first.wait_for(state="visible", timeout=2000)
+                        return frame_loc
+                except Exception:
+                    pass
+                try:
+                    # Fallbacks for Razorpay UI variants.
+                    alt_contact = frame_loc.locator(
+                        "[data-testid='contactNumber'], input[name='contact'], input[type='tel']"
+                    ).first
+                    if alt_contact.count() > 0 and alt_contact.is_visible():
+                        return frame_loc
+                except Exception:
+                    continue
+            time.sleep(1)
         return None
 
     def enroll_inr_one_time_and_proceed(self) -> None:
         """Enroll user in a short course and proceed to payment (codegen style)."""
-        enroll_btn = self.page.get_by_role("button", name="Enroll Now").first
-        expect(enroll_btn).to_be_visible(timeout=30000)
-        enroll_btn.click()
+        apply_now_btn = self.page.get_by_role("button", name=re.compile(r"Apply\s*Now", re.I)).first
+        enroll_now_btn = self.page.get_by_role("button", name=re.compile(r"Enroll\s*Now", re.I)).first
+        if apply_now_btn.count() > 0 and apply_now_btn.is_visible():
+            apply_now_btn.click()
+        else:
+            expect(enroll_now_btn).to_be_visible(timeout=30000)
+            enroll_now_btn.click()
 
         inr_radio = self.page.get_by_role("radio", name=re.compile(r"INR\s*\(\s*Indian Rupees\s*\)", re.I)).first
         if inr_radio.count() > 0 and inr_radio.is_visible():
@@ -237,6 +300,7 @@ class UserPurchasePage:
     def collect_selection_enroll_diagnostics(self) -> str:
         """Return compact diagnostics around selection->enroll boundary."""
         details_btn = self.page.get_by_role("button", name=re.compile(r"Course\s*Details", re.I)).first
+        apply_now_btn = self.page.get_by_role("button", name=re.compile(r"Apply\s*Now", re.I)).first
         enroll_now_btn = self.page.get_by_role("button", name=re.compile(r"Enroll\s*Now", re.I)).first
         enroll_btn = self.page.get_by_role("button", name=re.compile(r"\bEnroll\b", re.I)).first
         join_btn = self.page.get_by_role("button", name=re.compile(r"\bJoin\b", re.I)).first
@@ -244,6 +308,7 @@ class UserPurchasePage:
             f"url={self.page.url}\n"
             f"selected_course_title={self.selected_course_title}\n"
             f"course_details_visible={details_btn.count() > 0 and details_btn.is_visible()}\n"
+            f"apply_now_visible={apply_now_btn.count() > 0 and apply_now_btn.is_visible()}\n"
             f"enroll_now_visible={enroll_now_btn.count() > 0 and enroll_now_btn.is_visible()}\n"
             f"enroll_visible={enroll_btn.count() > 0 and enroll_btn.is_visible()}\n"
             f"join_visible={join_btn.count() > 0 and join_btn.is_visible()}\n"
@@ -253,19 +318,49 @@ class UserPurchasePage:
         """Complete Razorpay UPI payment using codegen-like UPI path."""
         razor_frame = self._select_razorpay_iframe_with_field("contactNumber")
         if razor_frame is None:
-            pytest.fail("Could not find Razorpay iframe containing contactNumber field.")
+            pytest.fail(f"Could not find Razorpay iframe containing contact field. url={self.page.url}")
 
+        expect(razor_frame.get_by_test_id("contactNumber")).to_be_visible(timeout=30000)
         razor_frame.get_by_test_id("contactNumber").click()
         razor_frame.get_by_test_id("contactNumber").fill(contact_number)
+        expect(razor_frame.get_by_test_id("upi")).to_be_visible(timeout=15000)
         razor_frame.get_by_test_id("upi").click()
 
         vpa_input = razor_frame.get_by_placeholder("example@okhdfcbank")
+        expect(vpa_input).to_be_visible(timeout=15000)
         vpa_input.click()
         vpa_input.fill(vpa_success)
-        # Codegen flow: choose the '@razorpay' suggestion option.
-        vpa_input.press("ArrowDown")
-        razor_frame.get_by_role("button", name="@razorpay").click()
-        razor_frame.get_by_test_id("vpa-submit").click()
+        # Codegen flow may show '@razorpay' suggestion; click it if present.
+        try:
+            vpa_input.press("ArrowDown")
+            suggestion = razor_frame.get_by_role("button", name="@razorpay").first
+            if suggestion.count() > 0:
+                suggestion.wait_for(state="visible", timeout=3000)
+                suggestion.click()
+            else:
+                vpa_input.press("Enter")
+        except Exception:
+            # In some runs suggestion list never appears; continue with entered VPA.
+            vpa_input.press("Enter")
+        submit_btn = razor_frame.get_by_test_id("vpa-submit")
+        expect(submit_btn).to_be_visible(timeout=15000)
+        try:
+            submit_btn.click(timeout=5000)
+        except Exception:
+            # Razorpay may transition to success overlay very quickly, making
+            # submit temporarily covered/detached. If success is already visible,
+            # continue flow instead of failing here.
+            success_in_frame = False
+            try:
+                success_heading = razor_frame.get_by_text(re.compile(r"Payment Successful", re.I)).first
+                success_in_frame = success_heading.count() > 0 and success_heading.is_visible()
+            except Exception:
+                success_in_frame = False
+            if not success_in_frame and "payment-success" not in self.page.url:
+                try:
+                    submit_btn.click(timeout=3000, force=True)
+                except Exception:
+                    pass
 
         # Wait for success page controls to show up.
         success_deadline = time.time() + 120
@@ -274,15 +369,32 @@ class UserPurchasePage:
                 break
             if self.page.get_by_role("button", name="Course Details").count() > 0:
                 break
+            try:
+                if razor_frame.get_by_text(re.compile(r"Payment Successful", re.I)).count() > 0:
+                    break
+            except Exception:
+                pass
             time.sleep(1)
 
     def verify_post_payment_course_access(self, user_title: str) -> None:
         """Verify post-payment course access via Course Details + My Courses."""
-        course_details_btn = self.page.get_by_role("button", name="Course Details").first
-        if course_details_btn.count() > 0 and course_details_btn.is_visible():
-            course_details_btn.click()
+        course_details_btn = self.page.get_by_role("button", name=re.compile(r"Course\s*Details", re.I)).first
+        view_course_btn = self.page.get_by_role("button", name=re.compile(r"View\s*Course", re.I)).first
 
-        view_course_btn = self.page.get_by_role("button", name="View Course").first
+        # Post-payment UI can take time; wait until details or view action appears.
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            if course_details_btn.count() > 0 and course_details_btn.is_visible():
+                course_details_btn.click()
+                # After opening details, give UI a short moment to render CTA buttons.
+                try:
+                    self.page.wait_for_load_state("networkidle")
+                except Exception:
+                    pass
+            if view_course_btn.count() > 0 and view_course_btn.is_visible():
+                break
+            time.sleep(1)
+
         expect(view_course_btn).to_be_visible(timeout=30000)
         view_course_btn.click()
 
@@ -294,7 +406,9 @@ class UserPurchasePage:
         except Exception:
             pass
 
-        self.page.get_by_text("My Courses").first.click()
+        my_courses = self.page.get_by_text("My Courses").first
+        expect(my_courses).to_be_visible(timeout=30000)
+        my_courses.click()
         expected_title = self._normalize_title_for_assertion(user_title)
         my_course_card = self.page.locator("mat-card, [class*='course-card'], [class*='course_card'], app-course-card").filter(
             has=self.page.get_by_text(expected_title, exact=False)

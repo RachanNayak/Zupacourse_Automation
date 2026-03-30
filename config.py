@@ -74,6 +74,16 @@ LONG_COURSE_REGISTRATION_FEE_INR = _env_int("LONG_COURSE_REGISTRATION_FEE_INR", 
 LONG_COURSE_REGISTRATION_FEE_USD = _env_int("LONG_COURSE_REGISTRATION_FEE_USD", 20)
 
 # -----------------------------------------------------------------------------
+# Learner long-course apply/pay flow configuration
+# -----------------------------------------------------------------------------
+USER_LONG_COURSE_NAME_HINT = _env("USER_LONG_COURSE_NAME_HINT", "")
+USER_APPLY_REASON = _env("USER_APPLY_REASON", "To learn")
+USER_ARTISTIC_BACKGROUND = _env("USER_ARTISTIC_BACKGROUND", "no experience")
+USER_PORTFOLIO_LINK = _env("USER_PORTFOLIO_LINK", "link.com")
+USER_LONG_PAYMENT_CONTACT_NUMBER = _env("USER_LONG_PAYMENT_CONTACT_NUMBER", "6360295267")
+USER_LONG_PAYMENT_VPA = _env("USER_LONG_PAYMENT_VPA", "success@razorpay")
+
+# -----------------------------------------------------------------------------
 # Browser
 # -----------------------------------------------------------------------------
 # Run browser in headed mode (visible window)

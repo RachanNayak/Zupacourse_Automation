@@ -95,10 +95,10 @@ class LongCoursePage:
 
         page.locator("mat-form-field").filter(has_text="End Date").get_by_label("Open calendar").click()
         time.sleep(0.3)
-        for _ in range(12):
+        for _ in range(24):
             page.get_by_role("button", name="Next month").click()
             time.sleep(0.05)
-        end_label = f"{m.group('month')} {m.group('day')}, {int(m.group('year')) + 1}"
+        end_label = f"{m.group('month')} {m.group('day')}, {int(m.group('year')) + 2}"
         page.get_by_role("button", name=end_label).click()
         time.sleep(0.2)
 
