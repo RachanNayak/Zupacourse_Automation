@@ -8,6 +8,20 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, expect
 
+from helpers.long_course_pricing import (
+    breakup_regex_registration_inr,
+    breakup_regex_registration_usd,
+    breakup_regex_subtotal_inr,
+    breakup_regex_subtotal_usd,
+    breakup_regex_term_fee_inr,
+    breakup_regex_term_fee_usd,
+    breakup_regex_total_inr,
+    breakup_regex_total_usd,
+    full_amount_inr_fill,
+    full_amount_usd_fill,
+    subscription_terms_option_label,
+)
+
 
 class LongCoursePage:
     def __init__(self, page: Page) -> None:
@@ -288,7 +302,7 @@ class LongCoursePage:
             terms_combo.locator("svg").first.click()
         except Exception:
             terms_combo.click()
-        page.get_by_role("option", name="8").first.click()
+        page.get_by_role("option", name=subscription_terms_option_label()).first.click()
 
         def _add_price(currency: str, amount: str) -> None:
             currency_combo = page.get_by_role("combobox", name=re.compile(r"Currency", re.I)).first
@@ -319,20 +333,20 @@ class LongCoursePage:
             add_btn.click()
             time.sleep(0.2)
 
-        # Add pricing rows.
-        _add_price("INR", "10000")
-        _add_price("USD", "1000")
+        # Add pricing rows (amounts from config via helpers).
+        _add_price("INR", full_amount_inr_fill())
+        _add_price("USD", full_amount_usd_fill())
 
-        # Validate price breakup values in the right panel.
-        expect(page.get_by_text(re.compile(r"Term Fee \+ GST\s*₹1,250\.00", re.I))).to_be_visible(timeout=10000)
-        expect(page.get_by_text(re.compile(r"Sub Total \+ GST\s*₹10,000\.00", re.I))).to_be_visible(timeout=10000)
-        expect(page.get_by_text(re.compile(r"One-time registration fee\s*₹1,840\.00", re.I))).to_be_visible(timeout=10000)
-        expect(page.get_by_text(re.compile(r"Total fee\s*₹11,840\.00", re.I))).to_be_visible(timeout=10000)
+        # Validate price breakup values in the right panel (derived from config).
+        expect(page.get_by_text(breakup_regex_term_fee_inr())).to_be_visible(timeout=10000)
+        expect(page.get_by_text(breakup_regex_subtotal_inr())).to_be_visible(timeout=10000)
+        expect(page.get_by_text(breakup_regex_registration_inr())).to_be_visible(timeout=10000)
+        expect(page.get_by_text(breakup_regex_total_inr())).to_be_visible(timeout=10000)
 
-        expect(page.get_by_text(re.compile(r"Term Fee \+ GST\s*\$125\.00", re.I))).to_be_visible(timeout=10000)
-        expect(page.get_by_text(re.compile(r"Sub Total \+ GST\s*\$1,000\.00", re.I))).to_be_visible(timeout=10000)
-        expect(page.get_by_text(re.compile(r"One-time registration fee\s*\$20\.00", re.I))).to_be_visible(timeout=10000)
-        expect(page.get_by_text(re.compile(r"Total fee\s*\$1,020\.00", re.I))).to_be_visible(timeout=10000)
+        expect(page.get_by_text(breakup_regex_term_fee_usd())).to_be_visible(timeout=10000)
+        expect(page.get_by_text(breakup_regex_subtotal_usd())).to_be_visible(timeout=10000)
+        expect(page.get_by_text(breakup_regex_registration_usd())).to_be_visible(timeout=10000)
+        expect(page.get_by_text(breakup_regex_total_usd())).to_be_visible(timeout=10000)
 
         # Wait out transient overlays before publishing.
         _wait_loader_hidden(timeout_s=15.0)

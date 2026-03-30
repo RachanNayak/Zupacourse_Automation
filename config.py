@@ -20,6 +20,14 @@ def _env(key: str, default: str = "") -> str:
     return (os.getenv(key) or default).strip()
 
 
+def _env_int(key: str, default: int) -> int:
+    raw = _env(key, str(default))
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 # -----------------------------------------------------------------------------
 # Site / base URL — change when switching org
 # -----------------------------------------------------------------------------
@@ -54,6 +62,16 @@ MANUAL_OTP_WAIT_SECONDS = int(_env("MANUAL_OTP_WAIT_SECONDS", "90") or "90")
 
 # Sign out before login (e.g. when switching accounts)
 SIGN_OUT_FIRST = _env("SIGN_OUT_FIRST", "").lower() in ("1", "true", "yes")
+
+# -----------------------------------------------------------------------------
+# Long course — subscription enrollment pricing (admin create flow)
+# -----------------------------------------------------------------------------
+# Override via `.env` without editing page objects. Breakup assertions derive from these.
+LONG_COURSE_SUBSCRIPTION_TERMS = _env_int("LONG_COURSE_SUBSCRIPTION_TERMS", 8)
+LONG_COURSE_FULL_AMOUNT_INR = _env("LONG_COURSE_FULL_AMOUNT_INR", "10000")
+LONG_COURSE_FULL_AMOUNT_USD = _env("LONG_COURSE_FULL_AMOUNT_USD", "1000")
+LONG_COURSE_REGISTRATION_FEE_INR = _env_int("LONG_COURSE_REGISTRATION_FEE_INR", 1840)
+LONG_COURSE_REGISTRATION_FEE_USD = _env_int("LONG_COURSE_REGISTRATION_FEE_USD", 20)
 
 # -----------------------------------------------------------------------------
 # Browser

@@ -1,7 +1,6 @@
 """Smoke test: Can an admin create a Long Course? (Full flow using POM.)"""
 import os
 import random
-import re
 import time as _time
 from typing import Iterable, Optional
 
@@ -11,6 +10,7 @@ from playwright.sync_api import Page, expect
 
 from config import ADMIN_EMAIL, BASE_URL, MANUAL_OTP, SIGN_OUT_FIRST
 from helpers.auth import login_as_admin, sign_out
+from helpers.long_course_pricing import course_card_term_inr_pattern, course_card_term_usd_pattern
 from tests.pages.long_course_page import LongCoursePage
 
 # Fixtures (paths and env wiring are unchanged; now passed into page objects)
@@ -142,9 +142,9 @@ def test_admin_create_long_course(page: Page) -> None:
             expect(img_tag.first).to_be_visible()
         elif bg_img.count() > 0:
             expect(bg_img.first).to_be_visible()
-        # Long course cards in this UI do not show author; validate per-term pricing instead.
-        expect(course_card).to_contain_text(re.compile(r"(₹\s*1,250(?:\.00)?)|(\b1,250(?:\.00)?\b.*term)", re.I))
-        expect(course_card).to_contain_text(re.compile(r"(\$\s*125(?:\.00)?)|(\b125(?:\.00)?\b.*term)", re.I))
+        # Long course cards show term-wise plan; amounts follow config-driven subscription pricing.
+        expect(course_card).to_contain_text(course_card_term_inr_pattern())
+        expect(course_card).to_contain_text(course_card_term_usd_pattern())
 
     with allure.step("Verify course is PUBLISHED (no unpublished badge on card)"):
         unpublished_badge = course_card.locator("[class*='unpublished-badge']")
