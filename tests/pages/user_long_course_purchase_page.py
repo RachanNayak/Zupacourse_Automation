@@ -1,5 +1,6 @@
 import re
 import time
+import json
 
 import pytest
 from playwright.sync_api import Page, expect
@@ -76,6 +77,97 @@ class UserLongCoursePurchasePage:
             return ""
         lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
         return lines[0] if lines else raw
+
+    def _debug_log(self, run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
+        payload = {
+            "sessionId": "3049bc",
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(time.time() * 1000),
+        }
+        with open("/Users/rachan/Divyakala smoke testAutomation/.cursor/debug-3049bc.log", "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+    def _ensure_sign_in_form_visible(self) -> None:
+        self.page.goto(f"{BASE_URL}/auth/sign-in")
+        self.page.wait_for_load_state("networkidle")
+        email_locator = self.page.get_by_label("Email ID", exact=False).or_(self.page.get_by_placeholder("Email ID"))
+        if email_locator.count() == 0 or not email_locator.first.is_visible():
+            # Fallback for sticky authenticated state: clear storage/cookies, then force sign-in.
+            self.page.context.clear_cookies()
+            self.page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
+            self.page.goto(f"{BASE_URL}/auth/sign-in")
+            self.page.wait_for_load_state("networkidle")
+
+    def _select_razorpay_iframe_with_field(self, test_id: str):
+        """Find Razorpay iframe containing expected field, across UI variants."""
+        self.page.wait_for_selector("iframe", timeout=45000)
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            iframes = self.page.locator("iframe")
+            max_iframes = min(iframes.count(), 10)
+            for i in range(max_iframes):
+                frame_loc = iframes.nth(i).content_frame
+                try:
+                    field = frame_loc.get_by_test_id(test_id)
+                    if field.count() > 0:
+                        field.first.wait_for(state="visible", timeout=2000)
+                        return frame_loc
+                except Exception:
+                    pass
+                try:
+                    alt_contact = frame_loc.locator(
+                        "[data-testid='contactNumber'], input[name='contact'], input[type='tel']"
+                    ).first
+                    if alt_contact.count() > 0 and alt_contact.is_visible():
+                        return frame_loc
+                except Exception:
+                    continue
+            time.sleep(1)
+        return None
+
+    def _open_module_or_batch_if_needed(self) -> None:
+        """
+        Some long-course UIs require opening an inner module/batch card
+        before Apply/Pay actions become visible.
+        """
+        apply_now = self.page.get_by_role("button", name=re.compile(r"Apply\s*Now", re.I)).first
+        pay_now = self.page.get_by_role("button", name=re.compile(r"Pay\s*Now", re.I)).first
+        if (apply_now.count() > 0 and apply_now.is_visible()) or (pay_now.count() > 0 and pay_now.is_visible()):
+            return
+
+        # Codegen-like nudge: click an inner thumbnail/image first, then module card.
+        img_candidates = self.page.get_by_role("img")
+        img_count = min(img_candidates.count(), 6)
+        for j in range(img_count):
+            img = img_candidates.nth(j)
+            try:
+                if img.is_visible():
+                    img.click(timeout=2000)
+                    break
+            except Exception:
+                continue
+
+        module_card = self.page.locator("mat-card").filter(
+            has_text=re.compile(r"Module|Batch|Session|\|\s*\d+", re.I)
+        ).first
+        try:
+            if module_card.count() > 0 and module_card.is_visible():
+                module_card.click(timeout=3000)
+                return
+        except Exception:
+            pass
+
+        # Fallback: click first visible inner card.
+        generic_card = self.page.locator("mat-card").first
+        try:
+            if generic_card.count() > 0 and generic_card.is_visible():
+                generic_card.click(timeout=3000)
+        except Exception:
+            pass
 
     @staticmethod
     def _is_effectively_disabled(button) -> bool:
@@ -162,24 +254,37 @@ class UserLongCoursePurchasePage:
                 except Exception:
                     continue
 
+            # In long-course flow, action buttons may appear only after opening
+            # a module/batch card inside the selected course.
+            self._open_module_or_batch_if_needed()
+            time.sleep(1.5)
             apply_now = self.page.get_by_role("button", name=re.compile(r"Apply\s*Now", re.I)).first
             pay_now = self.page.get_by_role("button", name=re.compile(r"Pay\s*Now", re.I)).first
             details = self.page.get_by_role("button", name=re.compile(r"Course\s*Details", re.I)).first
 
-            opened = False
-            deadline = time.time() + 20
+            ready = False
+            deadline = time.time() + 12
             while time.time() < deadline:
                 try:
                     if (apply_now.count() > 0 and apply_now.is_visible()) or (pay_now.count() > 0 and pay_now.is_visible()) or (
                         details.count() > 0 and details.is_visible()
                     ):
-                        opened = True
+                        ready = True
                         break
                 except Exception:
                     pass
                 time.sleep(0.5)
+            if not ready:
+                # Could not reach actionable state for this course; try next.
+                self.go_to_courses_landing()
+                self.filter_long_courses()
+                continue
 
-            if not opened:
+            # If Pay Now is already visible at first open, this course is already
+            # in payment stage for this learner. Skip and try the next course.
+            if pay_now.count() > 0 and pay_now.is_visible():
+                self.go_to_courses_landing()
+                self.filter_long_courses()
                 continue
 
             # If Apply Now exists but is disabled, course is already applied.
@@ -187,19 +292,60 @@ class UserLongCoursePurchasePage:
             if apply_now.count() > 0 and apply_now.is_visible():
                 try:
                     if self._is_effectively_disabled(apply_now):
+                        # #region agent log
+                        self._debug_log(
+                            "pre-fix",
+                            "H2",
+                            "user_long_course_purchase_page.py:apply_disabled",
+                            "Apply Now disabled; skip course and continue",
+                            {"courseTitle": title, "idx": idx},
+                        )
+                        # #endregion
                         self.go_to_courses_landing()
                         self.filter_long_courses()
                         continue
                 except Exception:
                     pass
 
+            # #region agent log
+            self._debug_log(
+                "pre-fix",
+                "H1",
+                "user_long_course_purchase_page.py:selected_course",
+                "Selected course deemed eligible for apply/pay flow",
+                {
+                    "courseTitle": title,
+                    "idx": idx,
+                    "applyVisible": apply_now.count() > 0 and apply_now.is_visible(),
+                    "payVisible": pay_now.count() > 0 and pay_now.is_visible(),
+                },
+            )
+            # #endregion
             self.selected_course_title = title
             return title
 
+        # #region agent log
+        self._debug_log(
+            "pre-fix",
+            "H1",
+            "user_long_course_purchase_page.py:no_eligible_course",
+            "No eligible course reached apply/pay actionable state",
+            {"candidateCount": len(candidate_indices)},
+        )
+        # #endregion
         pytest.fail("Found long-course cards, but none had an enabled Apply Now / eligible state.")
 
     def apply_now_for_selected_course(self, *, reason: str, artistic_background: str, portfolio_link: str) -> None:
         apply_now = self.page.get_by_role("button", name=re.compile(r"Apply\s*Now", re.I)).first
+        # #region agent log
+        self._debug_log(
+            "pre-fix",
+            "H3",
+            "user_long_course_purchase_page.py:apply_entry",
+            "Entered apply_now_for_selected_course",
+            {"selectedTitle": self.selected_course_title},
+        )
+        # #endregion
         expect(apply_now).to_be_visible(timeout=30000)
         apply_now.click()
 
@@ -231,12 +377,52 @@ class UserLongCoursePurchasePage:
         apply_modal_btn.click()
 
         expect(self.page.get_by_text(re.compile(r"Course applied successfully", re.I))).to_be_visible(timeout=15000)
+        # #region agent log
+        self._debug_log(
+            "pre-fix",
+            "H3",
+            "user_long_course_purchase_page.py:apply_success",
+            "Course apply success toast visible",
+            {"selectedTitle": self.selected_course_title},
+        )
+        # #endregion
 
     def admin_accept_application(self, *, admin_email: str, learner_email: str, selected_course_title: str, manual_otp: bool = True) -> None:
+        # #region agent log
+        self._debug_log(
+            "pre-fix",
+            "H4",
+            "user_long_course_purchase_page.py:admin_accept_entry",
+            "Entering admin acceptance flow",
+            {"selectedTitle": selected_course_title, "manualOtp": manual_otp},
+        )
+        # #endregion
         sign_out(self.page)
-        self.page.goto(f"{BASE_URL}/auth/sign-in")
-        self.page.wait_for_load_state("networkidle")
-        login_as_admin(self.page, email=admin_email, manual_otp=manual_otp, wait_for_navigation=True)
+        # #region agent log
+        self._debug_log(
+            "pre-fix",
+            "H5",
+            "user_long_course_purchase_page.py:after_sign_out",
+            "After sign_out helper in admin handoff",
+            {"url": self.page.url},
+        )
+        # #endregion
+        self._ensure_sign_in_form_visible()
+        email_locator = self.page.get_by_label("Email ID", exact=False).or_(self.page.get_by_placeholder("Email ID"))
+        # #region agent log
+        self._debug_log(
+            "pre-fix",
+            "H5",
+            "user_long_course_purchase_page.py:before_admin_login",
+            "Before login_as_admin call",
+            {
+                "url": self.page.url,
+                "emailFieldCount": email_locator.count(),
+                "crmVisible": self.page.get_by_text(re.compile(r"CRM", re.I)).first.count() > 0,
+            },
+        )
+        # #endregion
+        login_as_admin(self.page, email=admin_email, manual_otp=manual_otp, wait_for_navigation=False)
 
         crm_entry = self.page.get_by_text(re.compile(r"CRM", re.I)).first
         expect(crm_entry).to_be_visible(timeout=20000)
@@ -256,8 +442,7 @@ class UserLongCoursePurchasePage:
 
     def relogin_as_learner(self, *, learner_email: str, manual_otp: bool = True) -> None:
         sign_out(self.page)
-        self.page.goto(f"{BASE_URL}/auth/sign-in")
-        self.page.wait_for_load_state("networkidle")
+        self._ensure_sign_in_form_visible()
         login_as_user(self.page, email=learner_email, manual_otp=manual_otp, wait_for_navigation=True)
 
     def open_selected_long_course_from_listing(self, selected_course_title: str) -> None:
@@ -267,6 +452,8 @@ class UserLongCoursePurchasePage:
         card = self.page.locator("mat-card").filter(has_text=selected_course_title).first
         expect(card).to_be_visible(timeout=30000)
         card.click()
+        # Long-course UI may require opening inner module/batch before Pay Now appears.
+        self._open_module_or_batch_if_needed()
 
     @staticmethod
     def _money_to_float(raw: str) -> float:
@@ -274,7 +461,14 @@ class UserLongCoursePurchasePage:
         return float(cleaned) if cleaned else 0.0
 
     def learner_pay_now_and_verify(self, *, contact_number: str, vpa_success: str, registration_fee_inr: int) -> None:
+        self._open_module_or_batch_if_needed()
+        deadline = time.time() + 12
         pay_now = self.page.get_by_role("button", name=re.compile(r"Pay\s*Now", re.I)).first
+        while time.time() < deadline:
+            if pay_now.count() > 0 and pay_now.is_visible():
+                break
+            self._open_module_or_batch_if_needed()
+            self.page.wait_for_timeout(800)
         expect(pay_now).to_be_visible(timeout=30000)
         pay_now.click()
 
@@ -304,8 +498,9 @@ class UserLongCoursePurchasePage:
         self.page.get_by_role("button", name=re.compile(r"Proceed to Payment", re.I)).first.click()
 
         # Razorpay flow (adapted from short-course resilience).
-        self.page.wait_for_selector("iframe", timeout=45000)
-        frame = self.page.locator("iframe").first.content_frame
+        frame = self._select_razorpay_iframe_with_field("contactNumber")
+        if frame is None:
+            pytest.fail(f"Could not find Razorpay iframe containing contact field. url={self.page.url}")
 
         contact = frame.locator("#contact, [data-testid='contactNumber'], input[name='contact'], input[type='tel']").first
         expect(contact).to_be_visible(timeout=30000)
@@ -316,20 +511,51 @@ class UserLongCoursePurchasePage:
         except Exception:
             pass
 
-        try:
-            frame.get_by_role("listitem").filter(has_text=re.compile(r"UPI", re.I)).first.click(timeout=5000)
-        except Exception:
-            upi_tab = frame.get_by_test_id("upi").first
-            if upi_tab.count() > 0:
-                upi_tab.click()
+        upi_candidates = [
+            frame.get_by_test_id("upi").first,
+            frame.get_by_role("listitem").filter(has_text=re.compile(r"UPI", re.I)).first,
+            frame.get_by_text(re.compile(r"\bUPI\b", re.I)).first,
+        ]
+        for _ in range(5):
+            backdrop = frame.locator("#overlay-backdrop, [id='overlay-backdrop']").first
+            try:
+                if backdrop.count() > 0 and backdrop.is_visible():
+                    backdrop.click(timeout=1200, force=True)
+                    self.page.wait_for_timeout(300)
+            except Exception:
+                pass
+            upi_clicked = False
+            for upi_tab in upi_candidates:
+                try:
+                    if upi_tab.count() > 0:
+                        upi_tab.click(timeout=2000)
+                        upi_clicked = True
+                        break
+                except Exception:
+                    try:
+                        upi_tab.click(timeout=2000, force=True)
+                        upi_clicked = True
+                        break
+                    except Exception:
+                        continue
+            if upi_clicked:
+                break
+            self.page.wait_for_timeout(500)
 
-        vpa = frame.locator("#vpa-upi, [placeholder='example@okhdfcbank']").first
-        expect(vpa).to_be_visible(timeout=15000)
+        vpa = frame.locator(
+            "#vpa-upi, [placeholder='example@okhdfcbank'], [data-testid='vpa'], [data-testid='vpa-input'], input[placeholder*='@']"
+        ).first
+        expect(vpa).to_be_visible(timeout=30000)
         vpa.fill(vpa_success)
 
-        pay_btn = frame.get_by_role("button", name=re.compile(r"Pay Now|vpa-submit", re.I)).first
+        pay_btn = frame.get_by_test_id("vpa-submit").or_(
+            frame.get_by_role("button", name=re.compile(r"Pay\s*Now|Verify|Continue", re.I))
+        ).first
         if pay_btn.count() > 0:
-            pay_btn.click()
+            try:
+                pay_btn.click(timeout=5000)
+            except Exception:
+                pay_btn.click(timeout=5000, force=True)
 
         # Wait for successful transition indicators.
         deadline = time.time() + 120
