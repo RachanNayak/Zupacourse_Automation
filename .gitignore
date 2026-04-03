@@ -21,6 +21,7 @@ artifacts/
 # Local documents
 *.pdf
 
-# Keep large fixture media local-only to avoid GitHub size limits
-tests/fixtures/images/
-tests/fixtures/videos/
+# Track fixture media for CI; ignore other ad-hoc drops under videos/
+# (images are committed under tests/fixtures/images/)
+tests/fixtures/videos/*
+!tests/fixtures/videos/ci_fixture_*.mp4
