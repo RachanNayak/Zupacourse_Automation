@@ -288,13 +288,96 @@ class LongCoursePage:
 
         return {"author": selected_author, "image_filename": os.path.basename(course_image_path)}
 
+    def _wait_page_loader_hidden(self, page: Page, timeout_s: float = 25.0) -> None:
+        """Wait for full-page loader overlay to disappear (wizard steps after Save and Continue)."""
+        loader = page.locator("div.page-loader")
+        end_time = time.time() + timeout_s
+        while time.time() < end_time:
+            if loader.count() == 0:
+                return
+            try:
+                if not loader.first.is_visible():
+                    return
+            except Exception:
+                return
+            time.sleep(0.2)
+
+    def _ensure_create_batches_step(self, page: Page) -> None:
+        """After course details, the batches fields may be behind a tab or still loading."""
+        self._wait_page_loader_hidden(page)
+        try:
+            page.wait_for_load_state("networkidle")
+        except Exception:
+            pass
+        for pattern in (
+            re.compile(r"^Create\s*Batches?$", re.I),
+            re.compile(r"^Batches?$", re.I),
+        ):
+            tab = page.get_by_role("tab", name=pattern)
+            if tab.count() == 0:
+                continue
+            t = tab.first
+            try:
+                if not t.is_visible():
+                    continue
+                if (t.get_attribute("aria-selected") or "").lower() != "true":
+                    t.click()
+                    time.sleep(0.5)
+                    self._wait_page_loader_hidden(page, 15.0)
+            except Exception:
+                try:
+                    t.click()
+                    time.sleep(0.5)
+                except Exception:
+                    pass
+            break
+
+    def _batch_name_locator(self, page: Page):
+        """Prefer the batches tab panel so we do not hit a hidden duplicate elsewhere."""
+        panel = page.get_by_role("tabpanel", name=re.compile(r"Batches?", re.I))
+        if panel.count() > 0:
+            scoped = panel.get_by_role("textbox", name=re.compile(r"Batch\s*Name", re.I))
+            if scoped.count() > 0:
+                return scoped.first
+        return page.get_by_role("textbox", name=re.compile(r"Batch\s*Name", re.I)).first
+
+    def _fill_batch_name(self, page: Page, name: str) -> None:
+        self._ensure_create_batches_step(page)
+        tb = self._batch_name_locator(page)
+        expect(tb).to_be_visible(timeout=30000)
+        expect(tb).to_be_editable(timeout=15000)
+        tb.scroll_into_view_if_needed()
+        time.sleep(0.15)
+        try:
+            tb.click(timeout=5000)
+        except Exception:
+            pass
+        try:
+            tb.fill("")
+            tb.fill(name)
+        except Exception:
+            handle = tb.element_handle()
+            if handle:
+                page.evaluate(
+                    """(el, val) => {
+                        el.value = val;
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }""",
+                    handle,
+                    name,
+                )
+            else:
+                raise
+        time.sleep(0.15)
+
     # --- Create Batches ---
     def create_batches(self) -> None:
         page = self.page
         start_d = date.today()
         end_d = self._add_calendar_years(start_d, 2)
 
-        page.get_by_role("textbox", name="Batch Name").fill("Batch 1")
+        self._fill_batch_name(page, "Batch 1")
         start_date_cal = page.locator("div").filter(has_text=re.compile(r"^Start DateStart Time$")).get_by_label(
             "Open calendar"
         )
@@ -313,8 +396,9 @@ class LongCoursePage:
         page.get_by_role("button", name="Create Batch").click()
         page.wait_for_load_state("networkidle")
         time.sleep(0.5)
+        self._wait_page_loader_hidden(page)
 
-        page.get_by_role("textbox", name="Batch Name").fill("Batch 2")
+        self._fill_batch_name(page, "Batch 2")
         page.get_by_role("radio", name="Schedule Non-Recurring Batch").check()
         time.sleep(0.2)
         non_recurring_cal = page.get_by_role("button", name="Open calendar").first
