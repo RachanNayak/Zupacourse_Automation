@@ -5,6 +5,7 @@ import pytest
 from playwright.sync_api import Page, expect
 
 from config import BASE_URL
+from helpers import razorpay_checkout
 
 
 class UserPurchasePage:
@@ -250,35 +251,6 @@ class UserPurchasePage:
 
         pytest.fail(f"No published short course card found for nth_index={nth_index} (exclude_title={exclude_title!r}).")
 
-    def _select_razorpay_iframe_with_field(self, test_id: str):
-        """Find the iframe that contains a given test id field (e.g., contactNumber)."""
-        self.page.wait_for_selector("iframe", timeout=45000)
-        deadline = time.time() + 45
-        while time.time() < deadline:
-            iframes = self.page.locator("iframe")
-            max_iframes = min(iframes.count(), 10)
-            for i in range(max_iframes):
-                frame_loc = iframes.nth(i).content_frame
-                try:
-                    # Primary locator from codegen.
-                    field = frame_loc.get_by_test_id(test_id)
-                    if field.count() > 0:
-                        field.first.wait_for(state="visible", timeout=2000)
-                        return frame_loc
-                except Exception:
-                    pass
-                try:
-                    # Fallbacks for Razorpay UI variants.
-                    alt_contact = frame_loc.locator(
-                        "[data-testid='contactNumber'], input[name='contact'], input[type='tel']"
-                    ).first
-                    if alt_contact.count() > 0 and alt_contact.is_visible():
-                        return frame_loc
-                except Exception:
-                    continue
-            time.sleep(1)
-        return None
-
     def enroll_inr_one_time_and_proceed(self) -> None:
         """Enroll user in a short course and proceed to payment (codegen style)."""
         apply_now_btn = self.page.get_by_role("button", name=re.compile(r"Apply\s*Now", re.I)).first
@@ -316,65 +288,9 @@ class UserPurchasePage:
 
     def complete_razorpay_upi_success(self, *, contact_number: str, vpa_success: str) -> None:
         """Complete Razorpay UPI payment using codegen-like UPI path."""
-        razor_frame = self._select_razorpay_iframe_with_field("contactNumber")
-        if razor_frame is None:
-            pytest.fail(f"Could not find Razorpay iframe containing contact field. url={self.page.url}")
-
-        expect(razor_frame.get_by_test_id("contactNumber")).to_be_visible(timeout=30000)
-        razor_frame.get_by_test_id("contactNumber").click()
-        razor_frame.get_by_test_id("contactNumber").fill(contact_number)
-        expect(razor_frame.get_by_test_id("upi")).to_be_visible(timeout=15000)
-        razor_frame.get_by_test_id("upi").click()
-
-        vpa_input = razor_frame.get_by_placeholder("example@okhdfcbank")
-        expect(vpa_input).to_be_visible(timeout=15000)
-        vpa_input.click()
-        vpa_input.fill(vpa_success)
-        # Codegen flow may show '@razorpay' suggestion; click it if present.
-        try:
-            vpa_input.press("ArrowDown")
-            suggestion = razor_frame.get_by_role("button", name="@razorpay").first
-            if suggestion.count() > 0:
-                suggestion.wait_for(state="visible", timeout=3000)
-                suggestion.click()
-            else:
-                vpa_input.press("Enter")
-        except Exception:
-            # In some runs suggestion list never appears; continue with entered VPA.
-            vpa_input.press("Enter")
-        submit_btn = razor_frame.get_by_test_id("vpa-submit")
-        expect(submit_btn).to_be_visible(timeout=15000)
-        try:
-            submit_btn.click(timeout=5000)
-        except Exception:
-            # Razorpay may transition to success overlay very quickly, making
-            # submit temporarily covered/detached. If success is already visible,
-            # continue flow instead of failing here.
-            success_in_frame = False
-            try:
-                success_heading = razor_frame.get_by_text(re.compile(r"Payment Successful", re.I)).first
-                success_in_frame = success_heading.count() > 0 and success_heading.is_visible()
-            except Exception:
-                success_in_frame = False
-            if not success_in_frame and "payment-success" not in self.page.url:
-                try:
-                    submit_btn.click(timeout=3000, force=True)
-                except Exception:
-                    pass
-
-        # Wait for success page controls to show up.
-        success_deadline = time.time() + 120
-        while time.time() < success_deadline:
-            if "payment-success" in self.page.url:
-                break
-            if self.page.get_by_role("button", name="Course Details").count() > 0:
-                break
-            try:
-                if razor_frame.get_by_text(re.compile(r"Payment Successful", re.I)).count() > 0:
-                    break
-            except Exception:
-                pass
-            time.sleep(1)
+        razorpay_checkout.complete_razorpay_upi_success(
+            self.page, contact_number=contact_number, vpa_success=vpa_success
+        )
 
     def verify_post_payment_course_access(self, user_title: str) -> None:
         """Verify post-payment course access via Course Details + My Courses."""

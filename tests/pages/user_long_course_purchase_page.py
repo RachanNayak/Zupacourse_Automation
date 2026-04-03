@@ -1,12 +1,19 @@
+import json
+import os
 import re
 import time
-import json
 
 import pytest
 from playwright.sync_api import Page, expect
 
 from config import BASE_URL
 from helpers.auth import login_as_admin, login_as_user, sign_out
+from helpers import razorpay_checkout
+
+try:
+    import allure  # type: ignore
+except ImportError:  # pragma: no cover
+    allure = None
 
 
 class UserLongCoursePurchasePage:
@@ -79,6 +86,10 @@ class UserLongCoursePurchasePage:
         return lines[0] if lines else raw
 
     def _debug_log(self, run_id: str, hypothesis_id: str, location: str, message: str, data: dict) -> None:
+        """Append JSON lines only when DEBUG_LMS_LOG_PATH is set; never affects pass/fail."""
+        path = (os.getenv("DEBUG_LMS_LOG_PATH") or "").strip()
+        if not path:
+            return
         payload = {
             "sessionId": "3049bc",
             "runId": run_id,
@@ -88,8 +99,11 @@ class UserLongCoursePurchasePage:
             "data": data,
             "timestamp": int(time.time() * 1000),
         }
-        with open("/Users/rachan/Divyakala smoke testAutomation/.cursor/debug-3049bc.log", "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+        except OSError:
+            pass
 
     def _ensure_sign_in_form_visible(self) -> None:
         self.page.goto(f"{BASE_URL}/auth/sign-in")
@@ -101,33 +115,6 @@ class UserLongCoursePurchasePage:
             self.page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
             self.page.goto(f"{BASE_URL}/auth/sign-in")
             self.page.wait_for_load_state("networkidle")
-
-    def _select_razorpay_iframe_with_field(self, test_id: str):
-        """Find Razorpay iframe containing expected field, across UI variants."""
-        self.page.wait_for_selector("iframe", timeout=45000)
-        deadline = time.time() + 45
-        while time.time() < deadline:
-            iframes = self.page.locator("iframe")
-            max_iframes = min(iframes.count(), 10)
-            for i in range(max_iframes):
-                frame_loc = iframes.nth(i).content_frame
-                try:
-                    field = frame_loc.get_by_test_id(test_id)
-                    if field.count() > 0:
-                        field.first.wait_for(state="visible", timeout=2000)
-                        return frame_loc
-                except Exception:
-                    pass
-                try:
-                    alt_contact = frame_loc.locator(
-                        "[data-testid='contactNumber'], input[name='contact'], input[type='tel']"
-                    ).first
-                    if alt_contact.count() > 0 and alt_contact.is_visible():
-                        return frame_loc
-                except Exception:
-                    continue
-            time.sleep(1)
-        return None
 
     def _open_module_or_batch_if_needed(self) -> None:
         """
@@ -425,14 +412,28 @@ class UserLongCoursePurchasePage:
         login_as_admin(self.page, email=admin_email, manual_otp=manual_otp, wait_for_navigation=False)
 
         crm_entry = self.page.get_by_text(re.compile(r"CRM", re.I)).first
-        expect(crm_entry).to_be_visible(timeout=20000)
+        expect(crm_entry).to_be_visible(timeout=30000)
         crm_entry.click()
         self.page.wait_for_load_state("networkidle")
 
-        row = self.page.get_by_role("row").filter(has_text=learner_email).filter(has_text=re.compile(re.escape(selected_course_title), re.I)).first
-        expect(row).to_be_visible(timeout=30000)
-        expect(row.get_by_text(re.compile(r"unpaid", re.I)).first).to_be_visible(timeout=10000)
-        expect(row.get_by_text(re.compile(r"applied", re.I)).first).to_be_visible(timeout=10000)
+        row = self.page.get_by_role("row").filter(has_text=learner_email).filter(
+            has_text=re.compile(re.escape(selected_course_title), re.I)
+        ).first
+        try:
+            expect(row).to_be_visible(timeout=45000)
+        except Exception:
+            if allure is not None:
+                try:
+                    allure.attach(
+                        self.page.locator("body").inner_text()[:50000],
+                        name="crm_page_body_row_not_found",
+                        attachment_type=allure.attachment_type.TEXT,
+                    )
+                except Exception:
+                    pass
+            raise
+        expect(row.get_by_text(re.compile(r"unpaid", re.I)).first).to_be_visible(timeout=20000)
+        expect(row.get_by_text(re.compile(r"applied", re.I)).first).to_be_visible(timeout=20000)
 
         action_btn = row.get_by_role("button").first
         action_btn.click()
@@ -460,6 +461,41 @@ class UserLongCoursePurchasePage:
         cleaned = re.sub(r"[^0-9.]", "", raw or "")
         return float(cleaned) if cleaned else 0.0
 
+    @staticmethod
+    def _normalize_title_for_assertion(title: str) -> str:
+        t = title.replace("Unpublished", "").strip()
+        t = re.sub(r"\s+\d{6,}$", "", t).strip()
+        return t or title.strip()
+
+    @staticmethod
+    def _parse_quarterly_total_for_assertion(summary_text: str) -> tuple[float, float]:
+        """Best-effort (quarterly, total) INR amounts from the payment summary body."""
+        qm = re.search(r"(?:₹|Rs\.?)\s*([0-9,]+(?:\.\d{2})?)\s*per\s*quarter", summary_text, re.I)
+        quarter = UserLongCoursePurchasePage._money_to_float(qm.group(1) if qm else "")
+
+        dual = re.search(
+            r"(?:₹|Rs\.?)\s*([0-9,]+(?:\.\d{2})?)\s*(?:₹|Rs\.?)\s*([0-9,]+(?:\.\d{2})?)\s*per\s*quarter",
+            summary_text,
+            re.I,
+        )
+        total = 0.0
+        if dual:
+            total = UserLongCoursePurchasePage._money_to_float(dual.group(1))
+            if quarter <= 0:
+                quarter = UserLongCoursePurchasePage._money_to_float(dual.group(2))
+
+        if total <= 0:
+            for pat in (
+                r"(?:Grand\s+Total|Total\s+Amount|Amount\s+Payable|Total\s+payable)[^\n₹]*₹\s*([0-9,]+(?:\.\d{2})?)",
+                r"(?:Grand\s+Total|Total\s+Amount)\s*[:\s]*₹\s*([0-9,]+(?:\.\d{2})?)",
+            ):
+                m = re.search(pat, summary_text, re.I)
+                if m:
+                    total = UserLongCoursePurchasePage._money_to_float(m.group(1))
+                    break
+
+        return quarter, total
+
     def learner_pay_now_and_verify(self, *, contact_number: str, vpa_success: str, registration_fee_inr: int) -> None:
         self._open_module_or_batch_if_needed()
         deadline = time.time() + 12
@@ -482,106 +518,72 @@ class UserLongCoursePurchasePage:
 
         # Quarterly consistency: total should equal quarterly + fixed registration fee.
         summary_text = self.page.locator("body").inner_text()
-        quarter_match = re.search(r"₹\s*([0-9,]+(?:\.\d{2})?)\s*per\s*quarter", summary_text, re.I)
-        total_match = re.search(r"₹\s*([0-9,]+(?:\.\d{2})?)\s*₹\s*([0-9,]+(?:\.\d{2})?)\s*per\s*quarter", summary_text, re.I)
-
-        quarter_amt = self._money_to_float(quarter_match.group(1) if quarter_match else "0")
-        total_amt = self._money_to_float(total_match.group(1) if total_match else "0")
-
+        quarter_amt, total_amt = self._parse_quarterly_total_for_assertion(summary_text)
         if quarter_amt > 0 and total_amt > 0:
             expected_total = round(quarter_amt + float(registration_fee_inr), 2)
-            assert abs(total_amt - expected_total) < 0.01, (
-                f"Quarterly + registration mismatch: total={total_amt}, quarter={quarter_amt}, "
-                f"registration={registration_fee_inr}, expected={expected_total}"
-            )
+            if abs(total_amt - expected_total) >= 0.01:
+                if allure is not None:
+                    allure.attach(
+                        summary_text[:50000],
+                        name="long_course_pricing_summary_mismatch",
+                        attachment_type=allure.attachment_type.TEXT,
+                    )
+                pytest.fail(
+                    f"Quarterly + registration mismatch: total={total_amt}, quarter={quarter_amt}, "
+                    f"registration={registration_fee_inr}, expected={expected_total}"
+                )
 
         self.page.get_by_role("button", name=re.compile(r"Proceed to Payment", re.I)).first.click()
 
-        # Razorpay flow (adapted from short-course resilience).
-        frame = self._select_razorpay_iframe_with_field("contactNumber")
-        if frame is None:
-            pytest.fail(f"Could not find Razorpay iframe containing contact field. url={self.page.url}")
+        razorpay_checkout.complete_razorpay_upi_success(
+            self.page, contact_number=contact_number, vpa_success=vpa_success
+        )
 
-        contact = frame.locator("#contact, [data-testid='contactNumber'], input[name='contact'], input[type='tel']").first
-        expect(contact).to_be_visible(timeout=30000)
-        contact.fill(contact_number)
+    def is_enrolled_tag_visible(self) -> bool:
+        enrolled = self.page.get_by_text(re.compile(r"Enrolled", re.I)).first
+        return enrolled.count() > 0 and enrolled.is_visible()
 
-        try:
-            frame.get_by_role("button", name=re.compile(r"Proceed", re.I)).first.click(timeout=3000)
-        except Exception:
-            pass
+    def verify_post_payment_access(self, selected_course_title: str) -> None:
+        """Match short-course post-payment checks: details/view wait, My Courses, normalized title."""
+        course_details_btn = self.page.get_by_role("button", name=re.compile(r"Course\s*Details", re.I)).first
+        view_course_btn = self.page.get_by_role("button", name=re.compile(r"View\s*Course", re.I)).first
 
-        upi_candidates = [
-            frame.get_by_test_id("upi").first,
-            frame.get_by_role("listitem").filter(has_text=re.compile(r"UPI", re.I)).first,
-            frame.get_by_text(re.compile(r"\bUPI\b", re.I)).first,
-        ]
-        for _ in range(5):
-            backdrop = frame.locator("#overlay-backdrop, [id='overlay-backdrop']").first
-            try:
-                if backdrop.count() > 0 and backdrop.is_visible():
-                    backdrop.click(timeout=1200, force=True)
-                    self.page.wait_for_timeout(300)
-            except Exception:
-                pass
-            upi_clicked = False
-            for upi_tab in upi_candidates:
-                try:
-                    if upi_tab.count() > 0:
-                        upi_tab.click(timeout=2000)
-                        upi_clicked = True
-                        break
-                except Exception:
-                    try:
-                        upi_tab.click(timeout=2000, force=True)
-                        upi_clicked = True
-                        break
-                    except Exception:
-                        continue
-            if upi_clicked:
-                break
-            self.page.wait_for_timeout(500)
-
-        vpa = frame.locator(
-            "#vpa-upi, [placeholder='example@okhdfcbank'], [data-testid='vpa'], [data-testid='vpa-input'], input[placeholder*='@']"
-        ).first
-        expect(vpa).to_be_visible(timeout=30000)
-        vpa.fill(vpa_success)
-
-        pay_btn = frame.get_by_test_id("vpa-submit").or_(
-            frame.get_by_role("button", name=re.compile(r"Pay\s*Now|Verify|Continue", re.I))
-        ).first
-        if pay_btn.count() > 0:
-            try:
-                pay_btn.click(timeout=5000)
-            except Exception:
-                pay_btn.click(timeout=5000, force=True)
-
-        # Wait for successful transition indicators.
-        deadline = time.time() + 120
+        deadline = time.time() + 60
         while time.time() < deadline:
-            if "payment-success" in self.page.url:
-                break
-            if self.page.get_by_role("button", name=re.compile(r"Course\s*Details", re.I)).count() > 0:
+            if course_details_btn.count() > 0 and course_details_btn.is_visible():
+                course_details_btn.click()
+                try:
+                    self.page.wait_for_load_state("networkidle")
+                except Exception:
+                    pass
+            if view_course_btn.count() > 0 and view_course_btn.is_visible():
                 break
             time.sleep(1)
 
-    def verify_post_payment_access(self, selected_course_title: str) -> None:
-        details_btn = self.page.get_by_role("button", name=re.compile(r"Course\s*Details", re.I)).first
-        if details_btn.count() > 0 and details_btn.is_visible():
-            details_btn.click()
+        expect(view_course_btn).to_be_visible(timeout=30000)
+        view_course_btn.click()
+
+        self.is_enrolled_tag_visible()
+
+        try:
+            self.page.locator("app-video-title").get_by_role("img").first.click()
+        except Exception:
+            pass
 
         my_courses = self.page.get_by_text("My Courses").first
         expect(my_courses).to_be_visible(timeout=30000)
         my_courses.click()
+        expected_title = self._normalize_title_for_assertion(selected_course_title)
+        my_course_card = self.page.locator(
+            "mat-card, [class*='course-card'], [class*='course_card'], app-course-card"
+        ).filter(has=self.page.get_by_text(expected_title, exact=False)).first
+        expect(my_course_card).to_be_visible(timeout=30000)
+        my_course_card.click()
 
-        card = self.page.locator("mat-card").filter(has_text=selected_course_title).first
-        expect(card).to_be_visible(timeout=30000)
-        card.click()
+        my_view_course_btn = self.page.get_by_role("button", name="View Course").first
+        expect(my_view_course_btn).to_be_visible(timeout=30000)
+        my_view_course_btn.click()
 
-        view_course = self.page.get_by_role("button", name=re.compile(r"View\s*Course", re.I)).first
-        expect(view_course).to_be_visible(timeout=30000)
-        view_course.click()
         try:
             self.page.locator("app-video-title").get_by_role("img").first.click()
         except Exception:

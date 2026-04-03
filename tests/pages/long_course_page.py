@@ -1,8 +1,9 @@
+import calendar
 import os
 import random
 import re
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,169 @@ class LongCoursePage:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = screenshots_dir / f"long_course_{step_name}_{ts}.png"
         self.page.screenshot(path=str(path), full_page=True)
+
+    @staticmethod
+    def _add_calendar_years(d: date, years: int) -> date:
+        """Same month/day, N calendar years later (handles Feb 29 vs non-leap)."""
+        y = d.year + years
+        try:
+            return date(y, d.month, d.day)
+        except ValueError:
+            last = calendar.monthrange(y, d.month)[1]
+            return date(y, d.month, min(d.day, last))
+
+    @staticmethod
+    def _parse_mat_calendar_period(text: str) -> tuple[int, int] | None:
+        text = (text or "").strip()
+        for fmt in ("%b %Y", "%B %Y"):
+            try:
+                dt = datetime.strptime(text, fmt)
+                return dt.year, dt.month
+            except ValueError:
+                continue
+        return None
+
+    def _mat_datepicker_go_to_month(self, page: Page, year: int, month: int) -> None:
+        """Navigate Material calendar until the given year/month is shown."""
+        for _ in range(120):
+            period = page.locator(".mat-calendar-period-button").first
+            if period.count() == 0:
+                break
+            parsed = self._parse_mat_calendar_period(period.inner_text())
+            if not parsed:
+                break
+            cy, cm = parsed
+            if cy == year and cm == month:
+                return
+            delta = (year - cy) * 12 + (month - cm)
+            if delta > 0:
+                page.get_by_role("button", name="Next month").click()
+            elif delta < 0:
+                page.get_by_role("button", name="Previous month").click()
+            else:
+                break
+            time.sleep(0.08)
+
+    def _select_day_in_open_mat_calendar(self, target: date) -> None:
+        """With the Material datepicker overlay open, go to ``target`` and select that day."""
+        page = self.page
+        self._mat_datepicker_go_to_month(page, target.year, target.month)
+        day_btn = page.get_by_role(
+            "button",
+            name=re.compile(
+                rf"^{re.escape(target.strftime('%B'))}\s+0*{target.day},\s*{target.year}$",
+                re.I,
+            ),
+        ).first
+        expect(day_btn).to_be_visible(timeout=10000)
+        day_btn.click()
+        time.sleep(0.2)
+
+    def _select_course_form_date(self, field_has_text: str, target: date) -> None:
+        """Open Start/End Date on course form and pick ``target`` (locale: English month names)."""
+        page = self.page
+        page.locator("mat-form-field").filter(has_text=field_has_text).get_by_label("Open calendar").click()
+        time.sleep(0.3)
+        self._select_day_in_open_mat_calendar(target)
+
+    def _open_batch_calendar_and_select(self, calendar_locator, target: date) -> None:
+        """Scroll to batch datepicker trigger, open it, select ``target`` (same rules as course dates)."""
+        calendar_locator.first.scroll_into_view_if_needed()
+        time.sleep(0.3)
+        calendar_locator.first.click()
+        time.sleep(0.3)
+        self._select_day_in_open_mat_calendar(target)
+
+    def _click_long_course_session_date_option(self, page: Page, session_start: date) -> None:
+        """
+        Pick the session row that matches Batch 1 and the batch start date (today when creating the course).
+        Option text varies (ISO, slashes, or verbose English); try several patterns then visible mat-options.
+        """
+        ymd = session_start.strftime("%Y-%m-%d")
+        mdY = f"{session_start.month}/{session_start.day}/{session_start.year}"
+        mdY_padded = session_start.strftime("%m/%d/%Y")
+        dmy_padded = session_start.strftime("%d/%m/%Y")
+        mon_full = session_start.strftime("%B")
+        mon_abbr = session_start.strftime("%b")
+
+        patterns: list[re.Pattern[str]] = [
+            re.compile(rf"Batch\s*1.*{re.escape(ymd)}", re.I | re.DOTALL),
+            re.compile(rf"Batch\s*1.*{re.escape(mdY_padded)}", re.I | re.DOTALL),
+            re.compile(rf"Batch\s*1.*{re.escape(mdY)}", re.I | re.DOTALL),
+            re.compile(rf"Batch\s*1.*{re.escape(dmy_padded)}", re.I | re.DOTALL),
+            re.compile(
+                rf"Batch\s*1.*{re.escape(mon_full)}\s+0*{session_start.day}\s*,?\s*{session_start.year}",
+                re.I | re.DOTALL,
+            ),
+            re.compile(
+                rf"Batch\s*1.*{re.escape(mon_abbr)}\s+0*{session_start.day}\s*,?\s*{session_start.year}",
+                re.I | re.DOTALL,
+            ),
+            re.compile(rf".*{re.escape(ymd)}.*", re.I),
+            re.compile(r"Batch\s*1", re.I),
+        ]
+        for pat in patterns:
+            opt = page.get_by_role("option", name=pat)
+            try:
+                if opt.count() > 0:
+                    el = opt.first
+                    if el.is_visible():
+                        el.click()
+                        return
+            except Exception:
+                continue
+
+        all_opt = page.locator("mat-option")
+        n = min(all_opt.count(), 40)
+        for i in range(n):
+            o = all_opt.nth(i)
+            try:
+                if not o.is_visible():
+                    continue
+                txt = o.inner_text()
+                low = txt.lower()
+                if "batch" in low and re.search(r"\b1\b", txt):
+                    if ymd in txt or mdY in txt or mdY_padded in txt or mon_full.lower() in low or mon_abbr.lower() in low:
+                        o.click()
+                        return
+            except Exception:
+                continue
+        for i in range(n):
+            o = all_opt.nth(i)
+            try:
+                if o.is_visible():
+                    o.click()
+                    return
+            except Exception:
+                continue
+        pytest.fail("Could not select a session date option from the dropdown.")
+
+    def _set_long_course_video_file(self, page: Page, abs_path: str) -> None:
+        """Attach video to the correct file input (Angular often keeps multiple inputs in the DOM)."""
+        last_err: Exception | None = None
+        inputs = page.locator('input[type="file"]')
+        try:
+            expect(inputs.first).to_be_attached(timeout=15000)
+        except Exception:
+            pass
+        n = inputs.count()
+        if n == 0:
+            pytest.fail(f"No file input found for video upload (path={abs_path!r}).")
+        # Prefer inputs in the add-video / session area; try from last to first (video is usually the newest control).
+        order = list(range(n - 1, -1, -1)) + list(range(n))
+        seen: set[int] = set()
+        for idx in order:
+            if idx in seen:
+                continue
+            seen.add(idx)
+            inp = inputs.nth(idx)
+            try:
+                inp.set_input_files(abs_path)
+                return
+            except Exception as e:
+                last_err = e
+                continue
+        pytest.fail(f"Could not set video file {abs_path!r}: {last_err}")
 
     # --- Create Course & basic info ---
     def fill_course_details(self, title: str, course_image_path: str, dummy_file_path: str) -> dict:
@@ -84,23 +248,10 @@ class LongCoursePage:
 
         page.get_by_role("textbox", name="Course Name").fill(title)
 
-        page.locator("mat-form-field").filter(has_text="Start Date").get_by_label("Open calendar").click()
-        time.sleep(0.3)
-        start_btn = page.get_by_role("button", name=re.compile(r"March \d+,\s*\d{4}"))
-        start_label = start_btn.first.get_attribute("aria-label") or start_btn.first.inner_text()
-        m = re.search(r"^(?P<month>[A-Za-z]+)\s+(?P<day>\d+),\s*(?P<year>\d{4})", (start_label or "").strip())
-        assert m, f"Could not parse start date label: {start_label!r}"
-        start_btn.first.click()
-        time.sleep(0.2)
-
-        page.locator("mat-form-field").filter(has_text="End Date").get_by_label("Open calendar").click()
-        time.sleep(0.3)
-        for _ in range(24):
-            page.get_by_role("button", name="Next month").click()
-            time.sleep(0.05)
-        end_label = f"{m.group('month')} {m.group('day')}, {int(m.group('year')) + 2}"
-        page.get_by_role("button", name=end_label).click()
-        time.sleep(0.2)
+        start_d = date.today()
+        end_d = self._add_calendar_years(start_d, 2)
+        self._select_course_form_date("Start Date", start_d)
+        self._select_course_form_date("End Date", end_d)
 
         description_editor = page.locator("form").filter(has_text="Type of CourseLong").locator(
             "div.ql-editor[contenteditable='true']"
@@ -140,28 +291,18 @@ class LongCoursePage:
     # --- Create Batches ---
     def create_batches(self) -> None:
         page = self.page
+        start_d = date.today()
+        end_d = self._add_calendar_years(start_d, 2)
 
         page.get_by_role("textbox", name="Batch Name").fill("Batch 1")
         start_date_cal = page.locator("div").filter(has_text=re.compile(r"^Start DateStart Time$")).get_by_label(
             "Open calendar"
         )
-        start_date_cal.first.scroll_into_view_if_needed()
-        time.sleep(0.3)
-        start_date_cal.first.click()
-        time.sleep(0.3)
-        page.get_by_role("button", name=re.compile(r"March \d+,")).first.click()
-        time.sleep(0.2)
+        self._open_batch_calendar_and_select(start_date_cal, start_d)
         end_date_cal = page.locator("div").filter(has_text=re.compile(r"^End DateEnd Time$")).get_by_label(
             "Open calendar"
         )
-        end_date_cal.first.scroll_into_view_if_needed()
-        time.sleep(0.2)
-        end_date_cal.first.click()
-        time.sleep(0.3)
-        page.get_by_role("button", name="Next month").click()
-        time.sleep(0.2)
-        page.get_by_role("button", name=re.compile(r"April \d+,")).first.click()
-        time.sleep(0.2)
+        self._open_batch_calendar_and_select(end_date_cal, end_d)
         page.locator("div").filter(has_text=re.compile(r"^Start Time$")).nth(3).click()
         page.get_by_text("5:00 AM").click()
         page.get_by_role("combobox", name="End Time").locator("span").click()
@@ -176,9 +317,12 @@ class LongCoursePage:
         page.get_by_role("textbox", name="Batch Name").fill("Batch 2")
         page.get_by_role("radio", name="Schedule Non-Recurring Batch").check()
         time.sleep(0.2)
-        page.get_by_role("button", name="Open calendar").first.click()
+        non_recurring_cal = page.get_by_role("button", name="Open calendar").first
+        non_recurring_cal.scroll_into_view_if_needed()
+        time.sleep(0.2)
+        non_recurring_cal.click()
         time.sleep(0.3)
-        page.get_by_role("button", name=re.compile(r"March \d+,")).first.click()
+        self._select_day_in_open_mat_calendar(start_d)
         page.get_by_role("combobox", name=re.compile(r"Start Time")).locator("svg").click()
         page.get_by_text("6:00 AM", exact=True).click()
         page.get_by_role("combobox", name=re.compile(r"End Time")).locator("svg").click()
@@ -215,56 +359,51 @@ class LongCoursePage:
     # --- Add Videos ---
     def add_video(self, video_file_path: str) -> None:
         page = self.page
+        # Matches batch start in create_batches (today).
+        session_start = date.today()
+        abs_video = (
+            os.path.abspath(os.path.normpath((video_file_path or "").strip())) if (video_file_path or "").strip() else ""
+        )
 
-        page.get_by_role("combobox", name="Select Module").locator("svg").click()
+        module_combo = page.get_by_role("combobox", name="Select Module")
+        expect(module_combo).to_be_visible(timeout=15000)
+        module_combo.locator("svg").click()
+        time.sleep(0.2)
         page.get_by_role("option", name="Module 1").click()
         time.sleep(0.2)
-        page.get_by_role("combobox", name="Select Batch").locator("svg").click()
-        page.get_by_role("option", name="Batch 1").click()
-        time.sleep(0.2)
 
-        # Select session date first, then fill session name.
+        batch_combo = page.get_by_role("combobox", name="Select Batch")
+        batch_combo.locator("svg").click()
+        time.sleep(0.2)
+        page.get_by_role("option", name="Batch 1").click()
+        time.sleep(0.3)
+
         session_date_combo = page.get_by_role("combobox", name="Select Session Date")
+        expect(session_date_combo).to_be_visible(timeout=15000)
         session_date_combo.scroll_into_view_if_needed()
-        # Prefer clicking the combobox directly; fallback to inner span for variant UIs.
         try:
             session_date_combo.click()
         except Exception:
-            session_date_combo.locator("span").click()
+            session_date_combo.locator("span").first.click()
 
-        # Prefer the expected Batch/Session pattern, then fallback to first visible option.
-        expected_session_opt = page.get_by_role(
-            "option",
-            name=re.compile(r"Batch\s*1.*Session.*\d{4}-\d{2}-\d{2}", re.I),
-        )
-        if expected_session_opt.count() > 0:
-            expected_session_opt.first.click()
-        else:
-            all_options = page.get_by_role("option")
-            option_count = all_options.count()
-            clicked = False
-            for i in range(option_count):
-                opt = all_options.nth(i)
-                if opt.is_visible():
-                    opt.click()
-                    clicked = True
-                    break
-            if not clicked:
-                page.locator("mat-option").first.click()
+        expect(page.locator("mat-option").first).to_be_visible(timeout=15000)
+        self._click_long_course_session_date_option(page, session_start)
+        time.sleep(0.3)
+
+        session_name = page.get_by_role("textbox", name="Session Name")
+        expect(session_name).to_be_visible(timeout=10000)
+        session_name.fill("Session 1")
         time.sleep(0.2)
 
-        page.get_by_role("textbox", name="Session Name").fill("Session 1")
-
-        if os.path.isfile(video_file_path):
-            file_inputs = page.locator('input[type="file"]')
-            if file_inputs.count() > 0:
-                file_inputs.last.set_input_files(video_file_path)
+        if os.path.isfile(abs_video):
+            self._set_long_course_video_file(page, abs_video)
             page.get_by_role("button", name="Add Video").click()
         else:
             page.get_by_role("button", name="Skip").click()
 
-        page.get_by_role("button", name = "Save and Continue").click()
-
+        page.wait_for_load_state("networkidle")
+        time.sleep(0.2)
+        page.get_by_role("button", name="Save and Continue").click()
         page.wait_for_load_state("networkidle")
         time.sleep(0.3)
 

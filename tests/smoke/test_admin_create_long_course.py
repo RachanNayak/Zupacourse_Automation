@@ -89,7 +89,7 @@ def test_admin_create_long_course(page: Page) -> None:
         "Testing course",
         "Cricket",
         "Football",
-        "Looong cousre",
+        "Looong course",
         "Drawing",
         "Divine Art",
     ]
